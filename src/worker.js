@@ -530,7 +530,16 @@ async function api(request,env,db,url) {
     return json({items:items.slice(0,size),counts,page,next:items.length>size});
   }
   if (path === '/api/staff/team' && method === 'GET') {
-    const people=await db.all('SELECT email,role,active FROM users ORDER BY role DESC,email');
+    const people=await db.all(`SELECT staff.email,staff.role,staff.active,
+      COALESCE(auth_user.emailVerified,0) AS email_verified,
+      EXISTS(SELECT 1 FROM "account" a WHERE a.userId=auth_user.id AND a.providerId='credential'
+        AND a.password IS NOT NULL) AS has_password,
+      COALESCE(
+        (SELECT MIN(created_at) FROM audit WHERE action='team.first_sign_in' AND target=staff.id),
+        (SELECT MIN(createdAt) FROM "session" WHERE userId=auth_user.id)
+      ) AS first_sign_in_at
+      FROM users staff LEFT JOIN "user" auth_user ON auth_user.email=staff.email
+      ORDER BY staff.role DESC,staff.email`);
     return json(people.map(person=>({...person,owner:person.role==='manager' && person.email===ownerEmail})));
   }
   if (path === '/api/staff/imports' && method === 'GET') {

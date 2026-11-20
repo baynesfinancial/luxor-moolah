@@ -33,6 +33,7 @@ label,.field{display:grid;gap:6px;font-size:.87rem;font-weight:650;align-content
 .workspace-view-controls select{width:7rem}
 .workspace-view-controls :is(select,.button){height:42px;padding-block:0}
 .workspace-view-controls .button:disabled{cursor:default}
+.team-onboarding{margin-top:8px;gap:6px 16px}
 .inventory-list{padding:0;margin:16px 0;list-style:none;border:1px solid var(--line);border-radius:9px;background:var(--card)}
 .inventory-list li+li{border-top:1px solid var(--line)}
 .inventory-list-row{display:grid;grid-template-columns:minmax(0,2.5fr) minmax(0,1.2fr) minmax(0,.65fr) minmax(0,1fr) minmax(0,.7fr);align-items:center;gap:12px;padding:8px 12px;text-decoration:none;overflow-wrap:anywhere}

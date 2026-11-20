@@ -41,9 +41,25 @@ export function buildAuth(env, db, origin) {
     },
     databaseHooks:{
       user:{create:{before:async user=>Boolean(await allowedEmail(user.email))}},
-      session:{create:{before:async session=>Boolean(await db.one(`
-        SELECT 1 FROM "user" auth_user JOIN users staff ON staff.email=auth_user.email
-        WHERE auth_user.id=? AND staff.active=1`,session.userId))}},
+      session:{create:{
+        before:async session=>Boolean(await db.one(`
+          SELECT 1 FROM "user" auth_user JOIN users staff ON staff.email=auth_user.email
+          WHERE auth_user.id=? AND staff.active=1`,session.userId)),
+        after:async session=>{
+          if (!session) return;
+          try {
+            await db.run(`INSERT INTO audit(actor,action,target,created_at)
+              SELECT staff.id,'team.first_sign_in',staff.id,
+                COALESCE((SELECT MIN(createdAt) FROM "session" WHERE userId=auth_user.id),?)
+              FROM "user" auth_user JOIN users staff ON staff.email=auth_user.email
+              WHERE auth_user.id=? AND NOT EXISTS(
+                SELECT 1 FROM audit WHERE action='team.first_sign_in' AND target=staff.id
+              )`,new Date(session.createdAt).toISOString(),session.userId);
+          } catch(error) {
+            console.error('Could not record first staff sign-in',error.message);
+          }
+        }
+      }},
       // Give concurrent setup or reset attempts the same credential key.
       account:{create:{before:async account=>account.providerId==='credential'
         ? {data:{id:`credential:${account.userId}`}} : undefined}}

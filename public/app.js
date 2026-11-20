@@ -1104,6 +1104,7 @@ function renderCategories(body) {
 async function renderTeam(body) {
   const people=await api('/api/staff/team');
   const canManageAdmins=staff.can_manage_admins;
+  const signInTime=new Intl.DateTimeFormat(undefined,{dateStyle:'medium',timeStyle:'short'});
   body.innerHTML=workspaceHeading('Team')+`<div class="frame">
     <h3>Preview the workspace</h3>
     <p class="small" id="workspace-view-help">Open the staff view using your admin sign-in.</p>
@@ -1117,14 +1118,31 @@ async function renderTeam(body) {
     <p class="small">The invitation link lets each team member set their own password.</p><form class="formgrid" id="invite">
     ${field('email','Email address','','email','required')}
     ${canManageAdmins?'<label>Access role<select name="role"><option value="employee">Staff</option><option value="manager">Admin</option></select></label>':''}
-    <div class="form-action">${button('Send invitation')}</div></form>
-    ${people.map(person=>`<div class="actions frame"><div>${esc(person.email)} <span class="small">${person.owner?'Primary admin':person.role==='manager'?'Admin':'Staff'} · ${person.active?'Access enabled':'Access revoked'}</span></div>
+    <div class="form-action">${button('Send invitation')}</div></form></div>
+  <div class="frame"><div class="actions"><h3>Team members</h3>
+    <button type="button" class="button secondary" id="refresh-team">Refresh status</button></div>
+    ${people.map(person=>`<div class="actions frame"><div>
+    <div>${esc(person.email)} <span class="small">${person.owner?'Primary admin':person.role==='manager'?'Admin':'Staff'} · ${person.active?'Access enabled':'Access revoked'}</span></div>
+    <div class="controls team-onboarding small">
+      <span>${person.owner?(person.email_verified?'Email verified':'Email verification pending'):(person.email_verified?'Invite accepted':'Invite not accepted')}</span>
+      <span>${person.has_password?'Password set':'Password not set'}</span>
+      <span>First recorded sign-in ${person.first_sign_in_at
+        ? `<time datetime="${esc(person.first_sign_in_at)}">${esc(signInTime.format(new Date(person.first_sign_in_at)))}</time>`
+        : person.email_verified?'· date unavailable':'· pending'}</span>
+    </div></div>
     ${person.email!==staff.email && !person.owner && (person.role==='employee'||canManageAdmins)?`<div class="controls"><button class="button secondary" data-invite="${esc(person.email)}">${person.active?'Resend invite':'Restore and invite'}</button>
     ${person.active?`<button class="button danger" data-revoke="${esc(person.email)}">Revoke access</button>`:''}</div>`:''}</div>`).join('')}</div>`;
   const view=$('#workspace-view',body);
   const applyView=$('#open-workspace-view',body);
   view.addEventListener('change',()=>{ applyView.disabled=view.value!=='staff'; });
   applyView.addEventListener('click',()=>switchWorkspaceView(view.value));
+  $('#refresh-team',body).addEventListener('click',async event=>{
+    const refresh=event.currentTarget;
+    refresh.disabled=true;
+    try { await renderTeam(body); }
+    catch(error) { notify(error.message); }
+    finally { refresh.disabled=false; }
+  });
   async function change(email,disable=false,role) {
     try { await api('/api/staff/team',{email,disable,role});notify(disable?'Access revoked.':'Invitation sent.'); }
     catch(error){notify(error.message);}
