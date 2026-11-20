@@ -1,6 +1,7 @@
 import { HttpError, assert, clean, skuOf, units, money, date, dayInZone, offsetDay, emailOf, hashToken, goodImage } from './helpers.js';
 import { buildAuth, seedAdmin, staffSession } from './auth.js';
 import { dashboard } from './dashboard.js';
+import { deletionPreview, deleteRecord } from './cleanup.js';
 import { searchCustomers, createCustomer, customerId, customerDetail, listOrders, orderDetail, listReturns } from './customers.js';
 
 const id = () => crypto.randomUUID();
@@ -258,7 +259,7 @@ async function resolveImport(db,user,rowId,input,today) {
   if (action !== 'receive') writes.push(...saveProduct(db,sku,item,state,exists));
   if (action !== 'update') writes.push(...addStock(db,user,sku,quantity,cost,receivedOn,today,'CSV import'));
   if (action !== 'receive') writes.push(...await photoStatements(db,{id:row.importer},draft.photos ?? [],sku));
-  writes.push(db.sql('UPDATE import_rows SET approved_at=CURRENT_TIMESTAMP WHERE id=?',rowId),
+  writes.push(db.sql("UPDATE import_rows SET approved_at=CURRENT_TIMESTAMP,payload=json_set(payload,'$.sku',?) WHERE id=?",sku,rowId),
     audit(db,user,'import.approve',sku,action));
   await db.batch(writes);
   return json({sku});
@@ -365,6 +366,13 @@ async function api(request,env,db,url) {
   }
 
   requireManager(user);
+  const deletion=path.match(/^\/api\/staff\/(product|customers)\/([A-Za-z0-9_-]+)\/delete$/);
+  if (deletion) {
+    const kind=deletion[1]==='product'?'product':'customer';
+    const key=kind==='product'?skuOf(deletion[2]):deletion[2];
+    if (method==='GET') return json(await deletionPreview(db,kind,key));
+    if (method==='POST') return json(await deleteRecord(db,env,user,kind,key,await request.json()));
+  }
   const customerRoute = path.match(/^\/api\/staff\/customers\/([a-f0-9-]+)$/);
   const orderRoute = path.match(/^\/api\/staff\/orders\/([a-f0-9-]+)$/);
   if (path === '/api/staff/customers' && method === 'GET') return json(await searchCustomers(db,url));

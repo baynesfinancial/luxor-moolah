@@ -123,3 +123,12 @@ label,.field{display:grid;gap:6px;font-size:.87rem;font-weight:650;align-content
 .formgrid input:disabled{background:#eeebef;color:var(--muted);opacity:1}
 #stock-batches td:nth-child(5){overflow-wrap:anywhere}
 #stock-batches>summary .badge{margin-inline-start:8px;vertical-align:middle}
+.delete-dialog{color:var(--ink);background:var(--card);width:min(540px,calc(100% - 28px));max-height:85vh;border:1px solid var(--line);border-radius:12px;padding:22px}
+.delete-dialog::backdrop{background:#261b2b92}
+.delete-dialog h2{font-size:1.8rem}
+.delete-dialog dl{display:grid;gap:4px;margin-block:12px}
+.delete-dialog dl div{display:flex;justify-content:space-between;gap:10px}
+.delete-dialog form .controls{margin-top:12px}
+.delete-dialog [hidden]{display:none}
+.delete-dialog [data-delete-error]{color:#902e3e;margin-bottom:0}
+.delete-dialog [data-delete-error]:empty{display:none}

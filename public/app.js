@@ -488,7 +488,8 @@ async function renderStaffProduct(body,sku) {
       ${item.discount?'<button type="submit" class="button secondary" value="end" formnovalidate>End clearance</button>':''}</div></form></details>`:''}
     </section></div>
     ${manager?`<details class="frame"><summary>Edit item</summary><div id="product-editor"></div></details>
-      ${stockBatches(item)}`:''}`;
+      ${stockBatches(item)}
+      <div class="frame"><button type="button" class="button danger" data-delete-record>Delete product</button></div>`:''}`;
   wireGallery(item);
   const reload=()=>loadTab('Inventory',item.sku);
   if (manager && $('#sell')) wireCustomerPicker($('#sell'));
@@ -507,6 +508,7 @@ async function renderStaffProduct(body,sku) {
     notify('Damage report sent.'); form.reset();
   });
   if (manager) {
+    wireDeleteRecord('/api/staff/product/'+encodeURIComponent(item.sku)+'/delete','product','Inventory');
     renderProductEditor($('#product-editor'),item);
     const refreshStock=async()=>{
       await reload();
@@ -537,6 +539,72 @@ function table(headers,rows) {
 function dataTable(headers,rows,message='No records for this report.') {
   return rows.length?`<div class="tablewrap"><table><thead><tr>${headers.map(title=>`<th scope="col">${esc(title)}</th>`).join('')}</tr></thead>
     <tbody>${rows.map(row=>`<tr>${row.map(value=>`<td>${value}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`:empty(message);
+}
+function wireDeleteRecord(path,kind,returnTo) {
+  const trigger=$('[data-delete-record]');
+  trigger.addEventListener('click',async()=>{
+    trigger.disabled=true;
+    try {
+      const record=await api(path);
+      const product=kind==='product';
+      const labels={orders:'Orders',sales:'Sales and sale notes',returns:'Returns and refunds',moves:'Stock movements',
+        batches:'Stock batches',issues:'Damage reports',files:'Photo files',imports:'CSV import records'};
+      const dialog=document.createElement('dialog');
+      dialog.className='delete-dialog';
+      dialog.setAttribute('aria-labelledby','delete-title');
+      dialog.innerHTML=`<h2 id="delete-title">Permanently delete ${kind}?</h2>
+        <p><strong>${esc(record.name)}</strong> ${esc(product?`· ${record.id}`:[record.phone,record.email].filter(Boolean).join(' · '))}</p>
+        ${record.photos.length?`<div class="photo-row">${record.photos.map((id,index)=>img(id,`${record.name}, photo ${index+1}`,'issue-img')).join('')}</div>`:''}
+        <p>${product?'This removes the product and its history from inventory and reports. Other products on shared orders remain.':'This removes the customer, their orders, sales and refunds. Stock is recalculated and reports are updated.'}</p>
+        <dl>${Object.entries(record.counts).filter(([,count])=>count>0).map(([key,count])=>`<div><dt>${esc(labels[key])}</dt><dd>${count}</dd></div>`).join('')}</dl>
+        <div class="controls" data-delete-first><button type="button" class="button secondary" autofocus data-delete-cancel>Cancel</button>
+        <button type="button" class="button danger" data-delete-continue>Yes, continue</button></div>
+        <form data-delete-final hidden>${field('confirmation','Type DELETE to confirm','','text','required autocomplete="off"')}
+        <div class="controls"><button type="button" class="button secondary" data-delete-cancel>Cancel</button>
+        <button type="submit" class="button danger" disabled>Delete permanently</button></div></form>
+        <p data-delete-error role="alert"></p>`;
+      const form=$('[data-delete-final]',dialog);
+      const input=$('input',form);
+      const submit=$('button[type=submit]',form);
+      const error=$('[data-delete-error]',dialog);
+      let deleting=false;
+      $$('[data-delete-cancel]',dialog).forEach(button=>button.addEventListener('click',()=>dialog.close()));
+      dialog.addEventListener('cancel',event=>{if (deleting) event.preventDefault();});
+      dialog.addEventListener('close',()=>{dialog.remove();trigger.focus();},{once:true});
+      $('[data-delete-continue]',dialog).addEventListener('click',()=>{
+        $('[data-delete-first]',dialog).hidden=true;
+        form.hidden=false;
+        input.focus();
+      });
+      input.addEventListener('input',()=>{submit.disabled=input.value!=='DELETE';});
+      form.addEventListener('submit',async event=>{
+        event.preventDefault();
+        if (input.value!=='DELETE'||deleting) return;
+        deleting=true;
+        submit.disabled=true;
+        input.disabled=true;
+        const cancel=$('[data-delete-cancel]',form);
+        cancel.disabled=true;
+        try {
+          const result=await api(path,{confirmation:input.value,snapshot:record.snapshot});
+          dialog.close();
+          history.replaceState(null,'',staffLink(returnTo));
+          await loadTab(returnTo);
+          refreshPendingCount();
+          notify(result.cleanupPending?'Product deleted. Photo file cleanup will retry on the next product deletion.':`${record.name} deleted.`);
+        } catch (failure) {
+          error.textContent=failure.message;
+          deleting=false;
+          input.disabled=false;
+          cancel.disabled=false;
+          submit.disabled=failure.status===409;
+        }
+      });
+      document.body.append(dialog);
+      dialog.showModal();
+    } catch (error) { notify(error.message); }
+    finally { trigger.disabled=false; }
+  });
 }
 function staffAnchor(url,label) {
   return `<a href="${esc(url)}">${esc(label)}</a>`;
@@ -705,7 +773,9 @@ async function renderCustomers(body,id) {
     const customer=await api('/api/staff/customers/'+encodeURIComponent(id));
     body.innerHTML=workspaceHeading(customer.name)+`<a href="/staff?tab=Customers">← Customers</a>
       <section class="frame"><p>${esc([customer.phone,customer.email].filter(Boolean).join(' · '))}</p>
-        <h4>Purchase history</h4><div data-orders></div></section>`;
+        <h4>Purchase history</h4><div data-orders></div></section>
+        <div class="frame"><button type="button" class="button danger" data-delete-record>Delete customer</button></div>`;
+    wireDeleteRecord('/api/staff/customers/'+encodeURIComponent(customer.id)+'/delete','customer','Customers');
     return displayOrders($('[data-orders]',body),customer.id);
   }
   body.innerHTML=workspaceHeading('Customers')+`
