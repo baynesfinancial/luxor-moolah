@@ -171,6 +171,7 @@ body:has(.storefront-home) .masthead .brand em{color:#f2ca8a}
 .storefront-arrival-cards .product-card{grid-template:1fr / minmax(0,40%) minmax(0,1fr);align-items:center}
 .storefront-arrival-cards .product-card:only-child{grid-column:1/-1;grid-template-columns:minmax(0,min(40%,224px)) minmax(0,1fr)}
 .storefront-home .storefront-arrival-cards .product-card > :is(.photo,.placeholder){height:100%;aspect-ratio:1.13}
+.storefront-arrival-cards .product-card > .photo,.storefront-last-card > .photo{object-fit:contain;object-position:center}
 .storefront-arrival-cards .product-copy{min-width:0;overflow-wrap:anywhere}
 .storefront-last{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));margin-top:clamp(30px,5vw,62px);overflow:hidden;border:1px solid #75576b;border-radius:12px;background:#2d1c31;color:#fff9ec}
 .storefront-last-copy{display:grid;align-content:center;justify-items:start;gap:12px;padding:clamp(20px,4vw,46px)}
@@ -178,7 +179,8 @@ body:has(.storefront-home) .masthead .brand em{color:#f2ca8a}
 .storefront-last-copy p{margin:0;color:#f1dedc}
 .storefront-last .storefront-last-card{grid-template-rows:auto 1fr;border:0;border-radius:0;color:var(--ink)}
 .storefront-last .storefront-last-card:hover h3{text-decoration:underline;text-underline-offset:.2em}
-.storefront-home .storefront-last-card > :is(.photo,.placeholder){aspect-ratio:2.1;max-height:260px}
+.storefront-home .storefront-last-card > :is(.photo,.placeholder){aspect-ratio:auto;height:clamp(160px,18vw,208px)}
+.storefront-last-card > .photo{padding:12px}
 .storefront-last-card .product-copy{align-content:center}
 .storefront-filters{grid-template-columns:minmax(0,2fr) repeat(2,minmax(0,1fr)) auto;align-items:end;margin:0 0 20px}
 .storefront-filters label{min-width:0}
@@ -193,7 +195,7 @@ body:has(.storefront-home) .masthead .brand em{color:#f2ca8a}
   .storefront-hero-photo .photo{height:auto;aspect-ratio:1.4}
   .storefront-home .cards{gap:12px}
   .storefront-home .product-copy{padding:12px}
-  .storefront-home .storefront-last-card > :is(.photo,.placeholder){aspect-ratio:1.75;max-height:220px}
+  .storefront-home .storefront-last-card > :is(.photo,.placeholder){height:clamp(150px,44vw,190px)}
   .storefront-home #catalog .cards,.storefront-filters{grid-template-columns:repeat(2,minmax(0,1fr))}
   .storefront-filters .filter-search,.storefront-filters .button{grid-column:1/-1}
 }
