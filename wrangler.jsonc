@@ -12,7 +12,13 @@
     "migrations_dir": "migrations"
   }],
   "r2_buckets": [{ "binding": "PHOTOS", "bucket_name": "luxor-moolah-photos" }],
-  "vars": { "STORE_TIME_ZONE": "America/Guyana", "STORE_CURRENCY": "GYD", "STORE_WHATSAPP": "5926366630" },
+  "vars": {
+    "APP_ORIGIN": "",
+    "MAIL_FROM": "Luxor Moolah <login@quincybaynes.com>",
+    "STORE_CURRENCY": "GYD",
+    "STORE_TIME_ZONE": "America/Guyana",
+    "STORE_WHATSAPP": "5926366630"
+  },
   // Add the custom domain after verifying the Worker preview:
   // "routes": [{ "pattern": "store.quincybaines.com", "custom_domain": true }],
   "observability": { "enabled": true },
