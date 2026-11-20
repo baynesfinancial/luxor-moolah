@@ -12,6 +12,7 @@ const migrationsHint = 'Database unavailable. Apply the D1 migrations before run
 const publicStock = "p.state='active' AND p.price IS NOT NULL AND s.on_hand>0";
 const displayPrice = 'CASE WHEN p.discount=1 AND p.sale_price IS NOT NULL THEN p.sale_price ELSE p.price END';
 const catalogSelect = `SELECT p.sku,p.name,p.description,${displayPrice} AS display_price,
+ CASE WHEN p.discount=1 AND p.sale_price<p.price THEN p.price END AS original_price,
  p.type_id,t.name AS product_type,s.on_hand-s.reserved AS available,
  (SELECT id FROM photos WHERE sku=p.sku ORDER BY position,id LIMIT 1) AS cover,
  (SELECT group_concat(category_id) FROM product_categories WHERE sku=p.sku) AS categories
@@ -129,7 +130,8 @@ async function itemDetail(db, sku, user) {
   assert(item,'Item unavailable.',404);
   item.photos = await db.all('SELECT id FROM photos WHERE sku=? ORDER BY position,id',sku);
   if (user?.role === 'manager') {
-    Object.assign(item,await db.one('SELECT price,sale_price,discount,state,personal_note FROM products WHERE sku=?',sku));
+    Object.assign(item,await db.one(`SELECT price,sale_price,discount,state,personal_note,
+      (SELECT slot FROM featured_products WHERE sku=products.sku) AS featured_slot FROM products WHERE sku=?`,sku));
     item.themes = (await db.all('SELECT theme FROM product_themes WHERE sku=? ORDER BY theme_key',sku))
       .map(row=>row.theme).join(', ');
     const [batches,movements] = await db.batch([
@@ -173,6 +175,23 @@ async function catalog(db,url,staff) {
   const rows = await db.all(`${catalogSelect} WHERE ${where.join(' AND ')}
      ORDER BY p.name,p.sku LIMIT 49 OFFSET ?`,...params,(page-1)*48);
   return {items:rows.slice(0,48),next:rows.length>48,page};
+}
+
+async function shopHome(db) {
+  const available=`${publicStock} AND s.on_hand>s.reserved`;
+  const newest='COALESCE(p.published_at,p.created_at) DESC,p.sku';
+  const [featured,arrivals,clearance]=await db.batch([
+    db.sql(`${catalogSelect} JOIN featured_products f ON f.sku=p.sku WHERE ${available} ORDER BY f.slot`),
+    db.sql(`${catalogSelect} WHERE ${available} ORDER BY ${newest} LIMIT 4`),
+    db.sql(`${catalogSelect} WHERE ${available} AND p.discount=1 AND p.sale_price<p.price ORDER BY ${newest} LIMIT 3`)
+  ]);
+  return {featured:featured.results,arrivals:arrivals.results,clearance:clearance.results};
+}
+function featureStatements(db,sku,slot) {
+  const statements=[db.sql('DELETE FROM featured_products WHERE sku=? OR slot=?',sku,slot)];
+  if (slot) statements.push(db.sql(`INSERT INTO featured_products(slot,sku) VALUES(?,(
+    SELECT sku FROM products WHERE sku=? AND state='active' AND price IS NOT NULL))`,slot,sku));
+  return statements;
 }
 async function salesList(db,user,view) {
   const manager = user.role === 'manager';
@@ -287,6 +306,7 @@ async function api(request,env,db,url) {
       currency:env.STORE_CURRENCY ?? 'GYD',whatsapp:env.STORE_WHATSAPP ?? '5926366630',today});
   }
   if (path === '/api/catalog' && method === 'GET') return json(await catalog(db,url,null));
+  if (path === '/api/shop-home' && method === 'GET') return json(await shopHome(db));
   const product = path.match(/^\/api\/product\/([^/]+)$/);
   if (product && method === 'GET') return json(await itemDetail(db,skuOf(decodeURIComponent(product[1])),null));
   if (path === '/api/events' && method === 'POST') {
@@ -449,6 +469,24 @@ async function api(request,env,db,url) {
     else await db.run('INSERT INTO categories(kind,name) VALUES(?,?)',input.kind,name);
     return json({});
   }
+  const featured = path.match(/^\/api\/staff\/product\/([A-Za-z0-9_-]+)\/featured$/);
+  if (featured) {
+    const sku=skuOf(featured[1]);
+    const slot=Number(input.slot);
+    assert([0,1,2,3].includes(slot),'Choose a featured position.');
+    const item=await db.one('SELECT state,price FROM products WHERE sku=?',sku);
+    assert(item,'Product unavailable.',404);
+    if (slot) assert(item.state==='active' && item.price!=null,'Publish the item before featuring it.',409);
+    const writes=[...featureStatements(db,sku,slot),audit(db,user,'product.featured',sku,String(slot))];
+    try { await db.batch(writes); }
+    catch (error) {
+      if (String(error.message).includes('NOT NULL constraint failed: featured_products.sku')) {
+        throw new HttpError(409,'The item is no longer active. Refresh and try again.');
+      }
+      throw error;
+    }
+    return json({sku,slot});
+  }
   const clearance = path.match(/^\/api\/staff\/product\/([A-Za-z0-9_-]+)\/clearance$/);
   if (clearance) {
     const sku=skuOf(clearance[1]);
@@ -477,6 +515,9 @@ async function api(request,env,db,url) {
     if (input.personal_note !== undefined) item.personalNote=clean(input.personal_note,4000);
     const state = input.state ?? 'draft';
     assert(['draft','active','archived'].includes(state),'Select a listing status.');
+    const featuredSlot=Number(input.featured_slot??0);
+    assert([0,1,2,3].includes(featuredSlot),'Choose a featured position.');
+    assert(!featuredSlot || (!existing && state==='active'),'Choose a featured position on a new active listing.',409);
     const openingQuantity=units(input.quantity,true)??0;
     const unitCost=money(input.unit_cost);
     if (openingQuantity) {
@@ -487,6 +528,7 @@ async function api(request,env,db,url) {
     const statements = [...saveProduct(db,sku,item,state,existing),
       ...addStock(db,user,sku,openingQuantity,unitCost,today,today,null,`opening:${sku}`),
       ...await photoStatements(db,user,input.photos ?? [],sku)];
+    if (featuredSlot) statements.push(...featureStatements(db,sku,featuredSlot),audit(db,user,'product.featured',sku,String(featuredSlot)));
     if (Array.isArray(input.remove_photos)) {
       for (const image of input.remove_photos.slice(0,100)) statements.push(db.sql('DELETE FROM photos WHERE id=? AND sku=?',image,sku));
     }

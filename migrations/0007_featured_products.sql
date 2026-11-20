@@ -1,0 +1,4 @@
+CREATE TABLE featured_products (
+  slot INTEGER PRIMARY KEY CHECK(slot BETWEEN 1 AND 3),
+  sku TEXT NOT NULL UNIQUE REFERENCES products(sku) ON DELETE CASCADE
+);

@@ -91,10 +91,13 @@ function catalogFilters() {
 }
 function productCard(p,isStaff) {
   const link=isStaff?`/staff?sku=${encodeURIComponent(p.sku)}`:`/products/${encodeURIComponent(p.sku)}`;
-  const availability=isStaff ? badge(`${Math.max(p.available,0)} available`) : p.available<=0?badge('Pending Sale',true):'';
+  const availability=isStaff ? badge(`${Math.max(p.available,0)} available`) : p.available<=0?badge('Pending Sale',true):
+    p.available===1?badge('Only 1 left',true):'';
+  const type=`<span class="small">${esc(p.product_type || p.sku)}</span>`;
   return `<a class="product-card" href="${link}">${p.cover?img(p.cover,p.name):blank(p.name)}
-    <div class="product-copy"><span class="small">${esc(p.product_type || p.sku)}</span>
-    <h3>${esc(p.name)}</h3>${p.display_price!=null?`<p>${esc(price(p.display_price))}</p>`:''}${availability}</div></a>`;
+    <div class="product-copy">${isStaff?type:`<div class="storefront-card-meta">${type}${availability}</div>`}
+    <h3>${esc(p.name)}</h3>${p.display_price!=null?`<p${isStaff?'':' class="storefront-price"'}>${esc(price(p.display_price))}
+      ${!isStaff&&p.original_price!=null?`<del aria-label="Original price ${esc(price(p.original_price))}">${esc(price(p.original_price))}</del>`:''}</p>`:''}${isStaff?availability:''}</div></a>`;
 }
 function wireCatalog(isStaff=false) {
   const filters=$('#filters');
@@ -119,11 +122,25 @@ function wireCatalog(isStaff=false) {
   filters.addEventListener('input',()=>{clearTimeout(delayed);delayed=setTimeout(load,180);});
   load();
 }
-function renderShop() {
-  main.innerHTML=`<section class="hero"><div class="shell"><div class="art" aria-hidden="true"><div class="ribbon"></div></div>
-    <h1>Find a gift worth <em>giving.</em></h1><p>Browse mugs, fragrances, gift sets, and more from Luxor Moolah.</p>
-    <a href="#catalog" class="button gold">Browse the shop ↓</a></div></section>
-    <section class="shell section" id="catalog"><h2>Shop the collection</h2>${catalogFilters()}</section>`;
+async function renderShop() {
+  const {featured,arrivals,clearance}=await api('/api/shop-home').catch(()=>({featured:[],arrivals:[],clearance:[]}));
+  const hero=[...featured,...arrivals,...clearance].find(item=>item.cover);
+  const anchor=featured.length?'featured':arrivals.length?'just-in':'catalog';
+  main.innerHTML=`<div class="storefront-home"><section class="storefront-hero"><div class="shell storefront-hero-grid${hero?'':' storefront-hero-simple'}">
+    <div class="storefront-hero-copy"><h1>Small batches.<br><em>One-of-a-kind finds.</em></h1>
+    <p>Gifts and everyday favorites in limited quantities. See what’s in the shop today.</p>
+    <a href="#${anchor}" class="button gold">${featured.length?'Browse the featured edit':arrivals.length?'See what’s new':'Browse the shop'}</a></div>
+    ${hero?`<a class="storefront-hero-photo" href="/products/${encodeURIComponent(hero.sku)}">${img(hero.cover,hero.name)}<span>${esc(hero.name)}</span></a>`:''}</div></section>
+    ${featured.length?`<section class="shell storefront-section" id="featured" aria-labelledby="featured-heading">
+      <div class="storefront-heading"><h2 id="featured-heading">The Featured Edit</h2><a href="#catalog">Shop all</a></div>
+      <div class="cards storefront-featured">${featured.map(item=>productCard(item,false)).join('')}</div></section>`:''}
+    ${arrivals.length?`<section class="storefront-arrivals storefront-section" id="just-in" aria-labelledby="arrivals-heading"><div class="shell">
+      <div class="storefront-heading"><h2 id="arrivals-heading">Just In</h2></div>
+      <div class="cards">${arrivals.map(item=>productCard(item,false)).join('')}</div></div></section>`:''}
+    ${clearance.length?`<section class="shell storefront-last storefront-section" id="last-chance" aria-labelledby="clearance-heading">
+      <div class="storefront-last-copy"><h2 id="clearance-heading">Last Chance</h2><p>Clearance finds, while they last.</p></div>
+      <div class="cards">${clearance.map(item=>productCard(item,false)).join('')}</div></section>`:''}
+    <section class="shell storefront-section" id="catalog"><h2>Shop the collection</h2>${catalogFilters()}</section></div>`;
   wireCatalog();
 }
 function gallery(item) {
@@ -145,8 +162,9 @@ async function renderPublicProduct(sku) {
   const message=`Hi! I'm interested in ${item.name} (${item.sku}). ${location.origin}/products/${encodeURIComponent(item.sku)}`;
   main.innerHTML=`<div class="shell section"><a class="small" href="/#catalog">← Back to the shop</a>
     <div class="detail">${gallery(item)}<section><div class="controls">${badge(item.product_type || item.sku)}
-    ${item.available<=0?badge('Pending Sale',true):badge('Available')}</div>
-    <h1 class="display">${esc(item.name)}</h1><p class="price">${esc(price(item.display_price))}</p>
+    ${item.available<=0?badge('Pending Sale',true):item.available===1?badge('Only 1 left',true):badge('Available')}</div>
+    <h1 class="display">${esc(item.name)}</h1><p class="price storefront-price">${esc(price(item.display_price))}
+      ${item.original_price!=null?`<del aria-label="Original price ${esc(price(item.original_price))}">${esc(price(item.original_price))}</del>`:''}</p>
     <p class="small">SKU ${esc(item.sku)}</p>${item.description?`<p>${esc(item.description)}</p>`:''}
     ${meta.whatsapp?`<a class="button" id="whatsapp" href="${esc(waLink(meta.whatsapp,message))}" rel="noopener noreferrer" target="_blank">Ask on WhatsApp ↗</a>`: ''}
     </section></div></div>`;
@@ -401,11 +419,19 @@ function renderProductEditor(target,item) {
     <form id="product-form" class="formgrid">
     ${itemFields(item?{...item,price:amount(item.price),categories:list(item.categories)}:{},!!item,{openingStock,personalNote})}
     <label>Listing status<select name="state">${['draft','active','archived'].map(state=>option(state,state,item?.state)).join('')}</select></label>
+    ${item?'':`<div data-create-feature hidden><label>Featured position<select name="featured_slot" disabled>
+      ${featuredOptions(0)}</select></label><small>Choosing an occupied spot replaces its current product.</small></div>`}
     ${photoField()}<div class="span"><small>Choose photos in one or more selections. You can add more in Edit item after saving.</small>
       <ul class="photo-queue" data-photo-queue aria-live="polite"></ul></div>${item?.photos?.length?`<fieldset class="span"><legend>Current photos</legend><div class="photo-row" data-photo-order>${item.photos.map((photo,index)=>
     `<div data-position="${index+1}">${img(photo.id,'Photo '+(index+1),'issue-img')}<label>Order<select data-order="${esc(photo.id)}">${item.photos.map((_,position)=>option(position+1,position+1,index+1)).join('')}</select></label><label><input name="remove" type="checkbox" value="${esc(photo.id)}">Remove</label></div>`).join('')}</div></fieldset>`:''}
     <div class="span">${button('Save item')}</div></form></div>`;
   const form=$('#product-form',target);
+  const feature=$('[data-create-feature]',form);
+  if (feature) form.elements.state.addEventListener('change',()=>{
+    const active=form.elements.state.value==='active';
+    feature.hidden=!active;
+    form.elements.featured_slot.disabled=!active;
+  });
   const uploadPhotos=productPhotoPicker(form);
   wirePhotoOrder(form);
   formHandler(form,async(data,form)=>{
@@ -424,6 +450,9 @@ function renderProductEditor(target,item) {
     history.replaceState(null,'','/staff?sku='+encodeURIComponent(result.sku));
     await loadTab('Inventory',result.sku);
   });
+}
+function featuredOptions(selected,active=true) {
+  return option(0,'Not featured',selected)+(active?[1,2,3].map(slot=>option(slot,`Spot ${slot}`,selected)).join(''):'');
 }
 const adjustmentReasons={damaged:'Damaged item',missing:'Missing item',miscount:'Stock count correction',other:'Other'};
 function stockBatches(item) {
@@ -488,6 +517,11 @@ async function renderStaffProduct(body,sku) {
       ${item.discount?'<button type="submit" class="button secondary" value="end" formnovalidate>End clearance</button>':''}</div></form></details>`:''}
     </section></div>
     ${manager?`<details class="frame"><summary>Edit item</summary><div id="product-editor"></div></details>
+      ${item.state==='active'||item.featured_slot?`<details class="frame"><summary>Homepage feature${item.featured_slot?` · Spot ${item.featured_slot}`:''}</summary>
+        <form id="feature-product" class="formgrid"><label>Featured position<select name="slot">
+        ${featuredOptions(item.featured_slot??0,item.state==='active')}
+        </select></label><div>${button('Save featured position')}</div>
+        <small class="span">Choosing an occupied spot replaces its current product. Only available items appear on the homepage.</small></form></details>`:''}
       ${stockBatches(item)}
       <div class="frame"><button type="button" class="button danger" data-delete-record>Delete product</button></div>`:''}`;
   wireGallery(item);
@@ -510,6 +544,12 @@ async function renderStaffProduct(body,sku) {
   if (manager) {
     wireDeleteRecord('/api/staff/product/'+encodeURIComponent(item.sku)+'/delete','product','Inventory');
     renderProductEditor($('#product-editor'),item);
+    const featureForm=$('#feature-product');
+    if (featureForm) formHandler(featureForm,async data=>{
+      await api('/api/staff/product/'+encodeURIComponent(item.sku)+'/featured',data);
+      notify('Featured position saved.');
+      await reload();
+    });
     const refreshStock=async()=>{
       await reload();
       const stock=$('#stock-batches',body);
@@ -1259,7 +1299,7 @@ async function boot() {
     if (location.pathname==='/staff') return await openStaff();
     const item=location.pathname.match(/^\/products\/([^/]+)$/);
     if(item) return await renderPublicProduct(decodeURIComponent(item[1]));
-    renderShop();
+    return await renderShop();
   } catch(error) {
     main.innerHTML=`<div class="shell section"><h2>${error.status===404?'Item unavailable':'Luxor Moolah'}</h2>
     ${empty(error.message)}<a class="button secondary" href="/">Back to the shop</a></div>`;
