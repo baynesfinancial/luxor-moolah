@@ -20,7 +20,14 @@ const blank = name => `<div class="placeholder" aria-hidden="true">${esc(name?.s
 const empty = message => `<div class="empty">${esc(message)}</div>`;
 const button = (label,extra='') => `<button class="button ${extra}">${esc(label)}</button>`;
 const updateMeta = async () => { meta=await api('/api/meta'); };
-const format = input => Object.fromEntries(new FormData(input));
+const groupedMoney = /^\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?$/;
+const format = form => {
+  const data=Object.fromEntries(new FormData(form));
+  for (const input of $$('[data-money]',form)) {
+    if (groupedMoney.test(data[input.name])) data[input.name]=data[input.name].replaceAll(',','');
+  }
+  return data;
+};
 function notify(message) {
   toast.textContent=message;
   clearTimeout(timer);
@@ -47,6 +54,18 @@ function formHandler(form, action) {
 function field(name,label,value='',type='text',extra='') {
   return `<label>${esc(label)}<input type="${type}" name="${name}" value="${esc(value)}" ${extra}></label>`;
 }
+function commaAmount(value) {
+  const raw=String(value??'').trim();
+  if (!/^\d+(?:\.\d{1,2})?$/.test(raw)) return raw;
+  const [whole,fraction]=raw.split('.');
+  return whole.replace(/\B(?=(\d{3})+(?!\d))/g,',')+(fraction?`.${fraction}`:'');
+}
+function moneyField(name,label,value='',extra='') {
+  return field(name,label,commaAmount(value),'text',`inputmode="decimal" data-money ${extra}`);
+}
+main.addEventListener('change',event=>{
+  if (event.target.matches('[data-money]')) event.target.value=commaAmount(event.target.value);
+});
 function text(name,label,value='',extra='') {
   return `<label class="span">${esc(label)}<textarea name="${name}" ${extra}>${esc(value)}</textarea></label>`;
 }
@@ -302,7 +321,7 @@ function itemFields(item={},existing=false,{openingStock='',personalNote=''}={})
   return `${field('sku','SKU',item.sku??'','text',existing?'readonly':'placeholder="Assign automatically if blank"')}
     ${field('name','Product name',item.name,'text','required')}
     <label>Product type<select name="type_id">${options('type',item.type_id,'Select type')}</select></label>
-    ${field('price','Sales price',item.price,'number','min="0" step="0.01"')}${openingStock}
+    ${moneyField('price','Sales price',item.price)}${openingStock}
     ${text('description','Description',item.description)}${personalNote}${audienceInputs(item.categories??[])}
     <div class="span">${field('themes','Product themes',item.themes,'text','placeholder="Animal mugs, woodland gifts"')}
     <small>Separate themes with commas. Use the same theme on similar products to compare sales across SKUs.</small></div>`;
@@ -369,12 +388,16 @@ function wirePhotoOrder(form) {
   });
 }
 function renderProductEditor(target,item) {
-  const openingStock=item?.has_stock_history?'':`
-    ${field('quantity','Starting units','','number',`min="1" step="1" ${item?'':'required'}`)}
-    ${field('unit_cost','Unit cost','','number',`min="0" step="0.01" ${item?'':'required'}`)}`;
+  const initial=item?.batches?.[0];
+  const openingStock=item?`
+    ${field('initial_quantity','Starting units',initial?.received_quantity??'—','text','disabled')}
+    ${moneyField('initial_unit_cost','Initial unit cost',initial?.cost==null?'—':amount(initial.cost),'disabled')}
+    <small class="span">Use Stock batches to add or adjust stock.</small>`:`
+    ${field('quantity','Starting units','','number','min="1" step="1" required')}
+    ${moneyField('unit_cost','Unit cost','','required')}`;
   const personalNote=text('personal_note','Personal note (manager only)',item?.personal_note,'maxlength="4000"');
-  target.innerHTML=`<div class="frame"><div class="actions"><h3>${item?'Edit item':'Add item'}</h3>
-    ${item?'':'<button type="button" class="button secondary" data-close-inventory>Close</button>'}</div>
+  target.innerHTML=`<div${item?' class="item-edit-fields"':' class="frame"'}>${item?'':`<div class="actions"><h3>Add item</h3>
+    <button type="button" class="button secondary" data-close-inventory>Close</button></div>`}
     <form id="product-form" class="formgrid">
     ${itemFields(item?{...item,price:amount(item.price),categories:list(item.categories)}:{},!!item,{openingStock,personalNote})}
     <label>Listing status<select name="state">${['draft','active','archived'].map(state=>option(state,state,item?.state)).join('')}</select></label>
@@ -407,13 +430,19 @@ function stockBatches(item) {
   const batches=item.batches??[];
   const adjustments=item.adjustments??[];
   const batchLabels=new Map(batches.map((batch,index)=>[batch.id,`Batch ${index+1}`]));
+  const batchRows=batches.flatMap((batch,index)=>[
+    [batchLabels.get(batch.id),batch.received_on??'Unknown',batch.received_quantity==null?'—':`+${batch.received_quantity}`,
+      price(batch.cost),[index===0?'Initial stock':'Stock received',batch.receipt_note].filter(Boolean).join(' · '),batch.on_hand],
+    ...adjustments.filter(entry=>entry.batch_id===batch.id).reverse().map(entry=>[
+      batchLabels.get(batch.id),entry.effective_on,entry.qty>0?`+${entry.qty}`:`−${Math.abs(entry.qty)}`,price(batch.cost),
+      [adjustmentReasons[entry.reason]??'Stock adjustment',entry.note].filter(Boolean).join(' · '),'—'
+    ])
+  ]);
   return `<section class="frame" id="stock-batches"><h3>Stock batches</h3>
     <p class="small">Each receipt keeps its own date and unit cost. Use an adjustment to correct units in an existing batch.</p>
-    ${dataTable(['Batch','Received','On hand','Unit cost'],batches.map(batch=>[
-      batchLabels.get(batch.id),batch.received_on??'Unknown',batch.on_hand,price(batch.cost)
-    ].map(esc)),'No stock batches yet.')}
+    ${dataTable(['Batch','Date','Units','Unit cost','Description','On hand now'],batchRows.map(row=>row.map(esc)),'No stock batches yet.')}
     <details class="frame"><summary>Receive more stock</summary><form id="receive" class="formgrid">
-    ${field('quantity','Units','','number','min="1" step="1" required')}${field('unit_cost','Unit cost','','number','min="0" step="0.01" required')}
+    ${field('quantity','Units','','number','min="1" step="1" required')}${moneyField('unit_cost','Unit cost','','required')}
     ${field('received_on','Date received or made',meta.today,'date','required')}${text('note','Receipt note (optional)','','maxlength="500"')}
     <div class="span">${button('Receive stock')}</div></form></details>
     ${batches.length?`<details class="frame"><summary>Adjust stock</summary><form id="adjust" class="formgrid">
@@ -423,11 +452,6 @@ function stockBatches(item) {
     <label>Reason<select name="reason" required>${option('','Choose a reason')}${Object.entries(adjustmentReasons).map(([key,label])=>option(key,label)).join('')}</select></label>
     ${text('note','Details (required for Other)','','maxlength="500"')}
     <div class="span">${button('Record adjustment')}</div></form></details>`:''}
-    <h3>Adjustment history</h3>
-    ${adjustments.length?`<ul class="stock-history">${adjustments.map(entry=>`<li>
-      <strong>${entry.qty>0?'+':'−'}${Math.abs(entry.qty)} ${Math.abs(entry.qty)===1?'unit':'units'} · ${esc(adjustmentReasons[entry.reason]??'Stock adjustment')}</strong>
-      <span class="small">${[entry.effective_on,batchLabels.get(entry.batch_id),entry.actor_email].filter(Boolean).map(esc).join(' · ')}</span>
-      ${entry.note?`<p>${esc(entry.note)}</p>`:''}</li>`).join('')}</ul>`:empty('No adjustments recorded.')}
     </section>`;
 }
 async function renderStaffProduct(body,sku) {
@@ -441,22 +465,31 @@ async function renderStaffProduct(body,sku) {
     ${item.available>0?`<div class="frame"><h3>Record a sale</h3><form id="sell" class="formgrid">
     ${field('quantity','Units',1,'number',`min="1" max="${item.available}" required`)}
     ${field('sold_on','Sale date',meta.today,'date','required')}
-    ${manager?field('unit_price','Actual price per unit',amount(item.display_price),'number','min="0" step="0.01" required'):''}
-    ${manager?customerPicker():''}
+    ${manager?moneyField('unit_price','Actual price per unit',amount(item.display_price),'required')+customerPicker():`
+      ${moneyField('listed_price','Listed price per unit',item.display_price==null?'—':amount(item.display_price),'disabled')}
+      <label class="check span"><input type="checkbox" name="price_changed" value="yes">Sale price differed from the listed price</label>
+      ${text('note','Sale note for manager',undefined,'maxlength="2000"')}
+      <small class="span">If the price changed, include the actual price and why it changed.</small>`}
     <div class="span controls">${button(manager?'Record and approve sale':'Submit for review')}</div></form></div>`:''}
     ${manager?'':`<details class="frame"><summary>Report a damaged item</summary><form id="issue" class="formgrid">${text('note','What happened?')}${photoField(false)}
     <div class="span">${button('Send report')}</div></form></details>`}
-    ${manager?`<details class="frame"><summary>Edit item</summary><div id="product-editor"></div></details>
-      <details class="frame"><summary>${item.discount?'Manage clearance':'Put on clearance'}</summary>
+    </section></div>
+    ${manager?`${item.state==='active'?`<details class="frame"><summary>${item.discount?'Manage clearance':'Put on clearance'}</summary>
       <form id="clearance" class="formgrid"><p class="span small">Sales price ${esc(price(item.price))}.</p>
-      ${field('clearance_price','Clearance price',item.discount?amount(item.sale_price):'','number','min="0" step="0.01" required')}
+      ${moneyField('clearance_price','Clearance price',item.discount?amount(item.sale_price):'','required')}
       <div class="span controls">${button('Save clearance price')}
       ${item.discount?'<button type="submit" class="button secondary" value="end" formnovalidate>End clearance</button>':''}</div></form></details>`:''}
-    </section></div>${manager?stockBatches(item):''}`;
+      <details class="frame"><summary>Edit item</summary><div id="product-editor"></div></details>
+      ${stockBatches(item)}`:''}`;
   wireGallery(item);
   const reload=()=>loadTab('Inventory',item.sku);
   if (manager && $('#sell')) wireCustomerPicker($('#sell'));
+  const priceChanged=$('#sell [name="price_changed"]');
+  if (priceChanged) priceChanged.addEventListener('change',()=>{
+    $('#sell [name="note"]').required=priceChanged.checked;
+  });
   if ($('#sell')) formHandler($('#sell'),async data=>{
+    if (data.price_changed && !data.note?.trim()) throw new Error('Explain the price adjustment for the manager.');
     await api('/api/staff/sales',{...data,sku:item.sku});
     notify(manager?'Sale approved.':'Sale submitted.');
     await reload();
@@ -477,7 +510,7 @@ async function renderStaffProduct(body,sku) {
       notify('Stock adjusted.');
       await reload();
     });
-    formHandler($('#clearance'),async(data,_,submit)=>{
+    if ($('#clearance')) formHandler($('#clearance'),async(data,_,submit)=>{
       const remove=submit?.value==='end';
       await api('/api/staff/product/'+encodeURIComponent(item.sku)+'/clearance',{...data,remove});
       notify(remove?'Clearance ended.':'Clearance price saved.');
@@ -513,7 +546,7 @@ async function renderSales(body,view) {
       ${sale.notes.map(note=>`<p>${esc(note.note)}</p>`).join('')}
       ${sale.status==='pending'?(manager?`<form data-review="${sale.id}" class="formgrid">
         ${field('sku','SKU',sale.sku,'text','required')}${field('quantity','Units',sale.quantity,'number','min="1" required')}
-        ${field('sold_on','Sale date',sale.sold_on,'date','required')}${field('unit_price','Actual price per unit',amount(sale.unit_price),'number','min="0" step="0.01"')}
+        ${field('sold_on','Sale date',sale.sold_on,'date','required')}${moneyField('unit_price','Actual price per unit',amount(sale.unit_price))}
         ${text('note','Review note')}${customerPicker()}
         ${pendingCount>1?'<label class="check span"><input type="checkbox" name="group">Include in selected order</label>':''}
         <div class="span controls"><button class="button" value="approved">Approve</button>
@@ -558,7 +591,7 @@ function returnForm(id,remaining) {
   return `<form data-return="${esc(id)}" class="formgrid">
     ${field('returned_on','Return date',meta.today,'date','required')}<label class="check"><input name="restock" type="checkbox" checked>Return units to stock</label>
     ${field('quantity','Units returned',remaining,'number',`min="1" max="${remaining}" required`)}
-    ${field('refund','Total refund','','number','min="0" step="0.01" placeholder="Defaults to original unit price"')}
+    ${moneyField('refund','Total refund','','placeholder="Defaults to original unit price"')}
     ${text('note','Return reason')}<div class="span">${button('Record return','secondary')}</div></form>`;
 }
 function wireReturns(body,refresh) {
@@ -825,7 +858,7 @@ async function showDrafts() {
        <div class="photo-row">${(item.photos||[]).map(photo=>img(photo,'Draft photo','issue-img')).join('')}</div>
        <form class="formgrid" data-draft="${row.id}">${itemFields(item,!!item.sku)}
        ${field('quantity','Starting quantity',item.quantity,'number','min="0"')}
-       ${field('unit_cost','Unit cost',item.unit_cost,'number','min="0" step="0.01"')}
+       ${moneyField('unit_cost','Unit cost',item.unit_cost)}
        ${field('received_on','Date received',item.received_on,'date')}
        <label>Action<select name="action">${exists?'<option value="">Choose an action</option><option value="update">Update listing details</option>':'<option value="create">Create item</option>'}</select></label>
        <label class="check"><input type="checkbox" name="publish">Publish listing</label><div class="span">${button('Approve this row')}</div>

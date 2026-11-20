@@ -131,8 +131,10 @@ async function itemDetail(db, sku, user) {
     Object.assign(item,await db.one('SELECT price,sale_price,discount,state,personal_note FROM products WHERE sku=?',sku));
     item.themes = (await db.all('SELECT theme FROM product_themes WHERE sku=? ORDER BY theme_key',sku))
       .map(row=>row.theme).join(', ');
-    item.batches = await db.all(`SELECT b.id,b.received_on,b.cost,balances.on_hand
-      FROM batches b JOIN batch_balances balances ON balances.id=b.id WHERE b.sku=? ORDER BY b.rowid`,sku);
+    item.batches = await db.all(`SELECT b.id,b.received_on,b.cost,balances.on_hand,m.qty AS received_quantity,m.note AS receipt_note
+      FROM batches b JOIN batch_balances balances ON balances.id=b.id
+      LEFT JOIN movements m ON m.rowid=(SELECT rowid FROM movements WHERE batch_id=b.id AND kind='receive' ORDER BY rowid LIMIT 1)
+      WHERE b.sku=? ORDER BY b.rowid`,sku);
     item.has_stock_history = item.batches.length > 0;
     item.on_hand = item.batches.reduce((sum,batch)=>sum+batch.on_hand,0);
     item.adjustments = await db.all(`SELECT m.batch_id,m.qty,m.effective_on,m.reason,m.note,u.email AS actor_email
@@ -317,6 +319,11 @@ async function api(request,env,db,url) {
     const statements = [db.sql('INSERT INTO sales(id,sku,quantity,sold_on,submitted_by) VALUES(?,?,?,?,?)',sale,sku,quantity,soldOn,user.id)];
     if (input.direct) requireManager(user);
     const approve = user.role === 'manager';
+    const priceChanged = !approve && (input.price_changed === true || input.price_changed === 'yes');
+    const note = clean(input.note,2000);
+    assert(!priceChanged || note,'Explain the price adjustment for the manager.');
+    if (note) statements.push(db.sql('INSERT INTO sale_notes(id,sale_id,actor,note) VALUES(?,?,?,?)',
+      id(),sale,user.id,priceChanged ? `Price adjustment requested: ${note}` : note));
     if (approve) {
       const customer = await customerId(db,input.customer_id);
       const order = id();
@@ -431,17 +438,18 @@ async function api(request,env,db,url) {
   const clearance = path.match(/^\/api\/staff\/product\/([A-Za-z0-9_-]+)\/clearance$/);
   if (clearance) {
     const sku=skuOf(clearance[1]);
-    const product=await db.one('SELECT price FROM products WHERE sku=?',sku);
+    const product=await db.one('SELECT price,state FROM products WHERE sku=?',sku);
     assert(product,'Product unavailable.',404);
+    assert(input.remove===true || product.state==='active','Only active items can be put on clearance.',409);
     const reduced=input.remove===true?null:money(input.clearance_price);
     assert(input.remove===true || (reduced!=null && product.price!=null && reduced<product.price),
       'Enter a clearance price below the selling price.');
     const [result]=await db.batch([
-      db.sql(`UPDATE products SET sale_price=?,discount=? WHERE sku=? AND (? IS NULL OR price>?)`,
+      db.sql(`UPDATE products SET sale_price=?,discount=? WHERE sku=? AND (? IS NULL OR (state='active' AND price>?))`,
         reduced,reduced===null?0:1,sku,reduced,reduced),
       audit(db,user,reduced===null?'product.clearance.end':'product.clearance.set',sku)
     ]);
-    assert(result.meta.changes,'The selling price changed. Refresh and try again.',409);
+    assert(result.meta.changes,'The listing status or selling price changed. Refresh and try again.',409);
     return json({sku});
   }
   if (path === '/api/staff/product') {
