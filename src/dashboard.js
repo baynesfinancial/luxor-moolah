@@ -64,8 +64,10 @@ export async function dashboard(db,url,today) {
   const type = Number(params.get('type')) || null;
   const closeoutSku = params.get('sku')?.trim() ? skuOf(params.get('sku')) : null;
   const cutoff = offsetDay(today,-90);
-  const coverage = await db.one(`SELECT MIN(day) AS since FROM
-    (SELECT MIN(date(created_at)) AS day FROM movements UNION ALL SELECT MIN(sold_on) FROM sales WHERE status='approved')`);
+  const coverage = await db.one(`SELECT (SELECT MIN(day) FROM
+      (SELECT MIN(date(created_at)) AS day FROM movements UNION ALL SELECT MIN(sold_on) FROM sales WHERE status='approved')) AS since,
+    EXISTS(SELECT 1 FROM sales WHERE status='approved') AS has_sales,
+    EXISTS(SELECT 1 FROM movements) AS has_stock_history`);
   const [sales,former,snapshot,age,attention,interest,themeTrends,closeout] = await Promise.all([
     salesIn(db,span,type),salesIn(db,prior,type),
     db.one(`SELECT COALESCE(SUM(b.on_hand*b.cost),0) AS value,
@@ -128,8 +130,8 @@ export async function dashboard(db,url,today) {
         previous:priorBucket.revenue-priorBucket.refund});
     }
   }
-  return {span,prior,coverage:coverage.since,overviewSeries,sales:summarize(sales),previous:summarize(former),snapshot,
-    age,attention,interest,trends,themeTrends,closeout,
+  return {span,prior,coverage:coverage.since,hasSales:!!coverage.has_sales,hasStockHistory:!!coverage.has_stock_history,overviewSeries,sales:summarize(sales),previous:summarize(former),snapshot,
+    age,attention,interest:interest.map(row=>({...row,units_sold:current.get(row.sku)?.units??0})),trends,themeTrends,closeout,
     slow:interest.filter(item=>!current.get(item.sku)?.units),
     low:interest.filter(item=>item.available<=3 && current.get(item.sku)?.units>0)
       .sort((a,b)=>current.get(b.sku).units-current.get(a.sku).units),

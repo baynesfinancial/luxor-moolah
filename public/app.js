@@ -166,7 +166,8 @@ async function openStaff() {
     if (requested==='Categories') params.set('view','categories');
   }
   const tabs=manager?managerSections:[['Inventory','▧'],['My sales','▤']];
-  const tab=(manager?aliases[requested]:null)||requested;
+  let tab=(manager?aliases[requested]:null)||requested;
+  if (manager && tab==='Reports' && ['low','aging'].includes(params.get('view'))) tab='Inventory';
   activeTab=tabs.some(section=>section[0]===tab)?tab:sku?'Inventory':tabs[0][0];
   document.body.classList.add('staff-workspace');
   main.innerHTML=`<div class="workspace">
@@ -286,14 +287,36 @@ async function renderInventoryPage(body,params) {
   if (view==='categories') return renderCategories(content);
   if (view==='all') return renderStaffInventory(content);
   const days=overviewDays(params.get('days'));
-  const data=await api('/api/staff/dashboard?'+overviewQuery(days));
+  const productType=Number(params.get('type'))||null;
+  const query=overviewQuery(days);
+  if (productType) query.set('type',productType);
+  const data=await api('/api/staff/dashboard?'+query);
   const age=view==='aging';
   const rows=age?data.age:data.low;
-  content.innerHTML=`<section class="frame"><h2>${age?'Stock over 90 days':'Low-stock sellers'}</h2>
-    ${age?'':`<p class="small">Items sold in the last ${days} days with three or fewer units available.</p>`}
-    ${dataTable(age?['Product','Oldest batch','Aged units','Cost']:['Product','Available'],
-      rows.map(row=>[staffAnchor('/staff?sku='+encodeURIComponent(row.sku),row.name+' · '+row.sku),
-        ...(age?[esc(row.oldest),row.units,esc(price(row.value))]:[row.available])]),'No matching products.')}</section>`;
+  const slow=age?[]:data.slow;
+  const hasInventory=rows.length>0 || slow.length>0 || (age && data.snapshot.unknown_age>0);
+  const itemLink=sku=>'/staff?sku='+encodeURIComponent(sku);
+  const metrics=age?[
+    ['Units over 90 days',rows.reduce((sum,row)=>sum+row.units,0)],
+    ['Inventory cost',price(rows.reduce((sum,row)=>sum+(row.value??0),0))],
+    ['Units with unknown age',data.snapshot.unknown_age]
+  ]:[['Matching SKUs',rows.length],['Units available',rows.reduce((sum,row)=>sum+row.available,0)]];
+  content.innerHTML=`<h2>${age?'Stock over 90 days':'Low-stock sellers'}</h2>${reportMetrics(metrics)}
+    ${hasInventory||productType||params.get('filtered')==='1'?`<div class="frame"><form class="filter-grid" id="inventory-filter">
+      ${age?'':`<label>Sales period<select name="days">${[7,30,90].map(value=>option(value,`Last ${value} days`,days)).join('')}</select></label>`}
+      <label>Product type<select name="type">${options('type',productType,'All product types')}</select></label>
+      <div class="form-action">${button('Apply filters')}</div></form></div>`:''}
+    ${rows.length?reportPanel(age?'Aged inventory':'Last units available',
+      (age?'':`<p class="small">Items sold in the last ${days} days with three or fewer units available.</p>`)+
+      reportTable(age?['Product','Oldest batch','Aged units','Cost']:['Product','Available','SKU'],
+        rows.map(row=>[row.name,...(age?[row.oldest,row.units,price(row.value)]:[row.available,row.sku])]),age?2:1,
+        index=>itemLink(rows[index].sku))):''}
+    ${slow.length?reportPanel('No approved sales in this period',reportTable(['Product','Available','SKU'],
+      slow.map(row=>[row.name,row.available,row.sku]),1,index=>itemLink(slow[index].sku))):''}`;
+  const filter=$('#inventory-filter',content);
+  if (filter) formHandler(filter,async values=>{
+    location.assign(staffLink('Inventory',{view,days:values.days??days,type:values.type,filtered:1}));
+  });
 }
 function audienceInputs(selected=[]) {
   return `<fieldset class="span"><legend>Audience categories</legend><div class="controls">${meta.categories.filter(c=>c.kind==='audience')
@@ -642,7 +665,7 @@ function renderCategories(body) {
    ${[{id:'',name:''},...meta.categories.filter(row=>row.kind===kind)].map(row=>`
     <form class="formgrid" data-cat="${kind}" data-id="${row.id}">
       ${field('name',row.id?'Category name':'New category',row.name,'text','required')}
-      <div>${button(row.id?'Save name':'Add category','secondary')}</div></form>`).join('')}</div>`).join('');
+      <div class="form-action">${button(row.id?'Save name':'Add category','secondary')}</div></form>`).join('')}</div>`).join('');
   $$('[data-cat]',body).forEach(form=>formHandler(form,async data=>{
     await api('/api/staff/categories',{...data,kind:form.dataset.cat,id:form.dataset.id});await updateMeta();notify('Category saved.');renderCategories(body);
   }));
@@ -650,7 +673,7 @@ function renderCategories(body) {
 async function renderTeam(body) {
   const people=await api('/api/staff/team');
   body.innerHTML=workspaceHeading('Team')+`<div class="frame"><h3>Invite an employee</h3><form class="formgrid" id="invite">
-    ${field('email','Email address','','email','required')}<div>${button('Send invitation')}</div></form>
+    ${field('email','Email address','','email','required')}<div class="form-action">${button('Send invitation')}</div></form>
     ${people.map(person=>`<div class="actions frame"><div>${esc(person.email)} <span class="small">${esc(person.role)} · ${person.active?'Access enabled':'Access revoked'}</span></div>
     ${person.role==='employee'?`<div class="controls"><button class="button secondary" data-invite="${esc(person.email)}">${person.active?'Resend invite':'Restore and invite'}</button>
     ${person.active?`<button class="button danger" data-revoke="${esc(person.email)}">Revoke access</button>`:''}</div>`:''}</div>`).join('')}</div>`;
@@ -886,26 +909,28 @@ async function renderOverview(body,params) {
   comparison.addEventListener('change',change);
   await refresh();
 }
-const reportViews=[['sales','Sales & profit'],['themes','Product themes'],['low','Low-stock sellers'],
-  ['aging','Stock over 90 days'],['closeout','Stock closeout'],['storefront','Storefront activity'],['damage','Damage reports']];
+const reportViews=[['sales','Sales & profit'],['themes','Product themes'],['closeout','Stock closeout'],
+  ['storefront','Storefront activity'],['damage','Damage reports']];
 
 function reportMetrics(metrics) {
   return `<div class="dashboard-metrics report-metrics">${metrics.map(([label,value,caption])=>
     `<div class="dashboard-metric"><span class="dashboard-metric-label">${esc(label)}</span>
       <strong>${esc(value)}</strong>${caption?`<small>${esc(caption)}</small>`:''}</div>`).join('')}</div>`;
 }
-function reportTable(headers,rows,keyColumn=1) {
-  const cards=rows.map(row=>`<details class="report-row"><summary>
+function reportTable(headers,rows,keyColumn=1,itemLink=null) {
+  const cards=rows.map((row,index)=>`<details class="report-row"><summary>
     <span class="report-row-title">${esc(row[0])}</span>
     <span class="report-row-key"><small>${esc(headers[keyColumn])}</small>${esc(row[keyColumn])}</span>
-    </summary><dl>${headers.map((header,i)=>i===0||i===keyColumn?'':`<div><dt>${esc(header)}</dt><dd>${esc(row[i])}</dd></div>`).join('')}</dl></details>`);
-  return rows.length?`<div class="report-desktop">${table(headers,rows)}</div><div class="report-mobile">${cards.join('')}</div>`:
+    </summary><dl>${headers.map((header,i)=>i===0||i===keyColumn?'':`<div><dt>${esc(header)}</dt><dd>${esc(row[i])}</dd></div>`).join('')}
+    ${itemLink?`<div><dt>Item</dt><dd>${staffAnchor(itemLink(index),'View item')}</dd></div>`:''}</dl></details>`);
+  const desktop=itemLink?dataTable(headers,rows.map((row,index)=>[staffAnchor(itemLink(index),row[0]),...row.slice(1).map(esc)])):table(headers,rows);
+  return rows.length?`<div class="report-desktop">${desktop}</div><div class="report-mobile">${cards.join('')}</div>`:
     empty('No records match these filters.');
 }
 function reportPanel(title,contents) {
   return `<section class="frame report-results"><h2>${esc(title)}</h2>${contents}</section>`;
 }
-function drawReport(view,data) {
+function drawReport(view,data,sort) {
   const compareOk=data.coverage && data.prior.start>=data.coverage;
   const delta=(value,prior)=>compareOk?`${value>prior?'+':''}${value-prior}`:'—';
   const byName=item=>`${item.name} · ${item.sku}`;
@@ -917,7 +942,11 @@ function drawReport(view,data) {
       metrics:[['Net sales',price(netSales(sales)),compareOk?`${price(netSales(previous))} in comparison period`:''],
         ['Gross profit',price(sales.profit),sales.unknown?`${sales.unknown} entries with missing cost`:''],
         ['Refunds',price(sales.refund),`${sales.returned} units returned`]],
-      results:reportPanel('Sales results',
+      above: data.series.some(row=>row.revenue>0)?reportPanel('Gross sales over time',
+        `<div class="chart">${data.series.map(row=>`<div class="chart-row">
+          <span>${esc(row.bucket)}</span><meter min="0" max="${max}" value="${row.revenue}" aria-label="Gross sales for ${esc(row.bucket)}"></meter>
+          <span>${esc(price(row.revenue))}</span></div>`).join('')}</div>`):'',
+      results: (data.series.length || (compareOk && (previous.units || previous.returned)))?reportPanel('Sales results',
         `<p class="small">${esc(data.span.start)} to ${esc(data.span.end)} · Comparison ${esc(data.prior.start)} to ${esc(data.prior.end)}</p>
         ${!data.coverage||data.span.start<data.coverage?'<p class="small">Historical coverage is incomplete for the selected period.</p>':''}
         ${reportTable(['Measure','Selected period','Comparison period'],[
@@ -925,45 +954,30 @@ function drawReport(view,data) {
           ['Gross profit',price(sales.profit),compareOk?price(previous.profit):'—'],
           ['Refunds',price(sales.refund),compareOk?price(previous.refund):'—'],
           ['Units sold',sales.units,compareOk?previous.units:'—'],
-          ['Units returned',sales.returned,compareOk?previous.returned:'—']])}`)+
-        reportPanel('Gross sales over time',data.series.length?`<div class="chart">${data.series.map(row=>`<div class="chart-row">
-         <span>${esc(row.bucket)}</span><meter min="0" max="${max}" value="${row.revenue}" aria-label="Gross sales for ${esc(row.bucket)}"></meter>
-         <span>${esc(price(row.revenue))}</span></div>`).join('')}</div>`:empty('No approved sales in this period.'))
+          ['Units returned',sales.returned,compareOk?previous.returned:'—']])}`):''
     };
   }
   if (view==='themes') return {
     metrics:[['Top theme',data.themeTrends.find(row=>row.units>0)?.name??'—'],
       ['Units sold',data.sales.units],['Themes with sales',data.themeTrends.filter(row=>row.units>0).length]],
-    results:reportPanel('Sales by theme','<p class="small">Sold-out products count toward their themes. An item can count toward more than one theme.</p>'+
+    results:(data.themeTrends.length?reportPanel('Sales by theme','<p class="small">Sold-out products count toward their themes. An item can count toward more than one theme.</p>'+
       reportTable(['Theme','Units sold','Distinct SKUs sold','Prior units','Change'],data.themeTrends.map(row=>[
         row.name,row.units,row.sku_count,compareOk?row.previous:'—',delta(row.units,row.previous)
-      ])))+reportPanel('Trending SKUs',reportTable(['Product','Units sold','Prior units','Change'],data.trends.map(row=>[
-        byName(row),row.units,compareOk?row.previous:'—',delta(row.units,row.previous)])))
-  };
-  if (view==='low') return {
-    metrics:[['Matching SKUs',data.low.length],['Units available',total(data.low,'available')]],
-    results:reportPanel('Last units available','<p class="small">Items with sales in this period and three or fewer units available.</p>'+
-      reportTable(['Product','Available','SKU'],data.low.map(row=>[row.name,row.available,row.sku])))+
-      reportPanel('No approved sales in this period',reportTable(['Product','Available','SKU'],data.slow.map(row=>[row.name,row.available,row.sku])))
-  };
-  if (view==='aging') return {
-    metrics:[['Units over 90 days',total(data.age,'units')],
-      ['Inventory cost',price(total(data.age,'value'))],['Units with unknown age',data.snapshot.unknown_age]],
-    results:reportPanel('Aged inventory',reportTable(['Product','Oldest batch','Units on hand','Cost'],
-      data.age.map(row=>[byName(row),row.oldest,row.units,price(row.value)]),2))
+      ]))):'')+(data.trends.length?reportPanel('Trending SKUs',reportTable(['Product','Units sold','Prior units','Change'],data.trends.map(row=>[
+        byName(row),row.units,compareOk?row.previous:'—',delta(row.units,row.previous)]))):'')
   };
   if (view==='closeout') return {
     metrics:[['Matching SKUs',data.closeout.length],['Units received',total(data.closeout,'received')],['Closing units',total(data.closeout,'closing')]],
-    results:reportPanel('Stock movement by SKU',reportTable(['Product','Opening','Received','Sold','Restocked','Adjusted','Closing'],
-      data.closeout.map(row=>[byName(row),row.opening,row.received,row.sold,row.restocked,row.adjusted,row.closing]),6))
+    results:data.closeout.length?reportPanel('Stock movement by SKU',reportTable(['Product','Opening','Received','Sold','Restocked','Adjusted','Closing'],
+      data.closeout.map(row=>[byName(row),row.opening,row.received,row.sold,row.restocked,row.adjusted,row.closing]),6)):''
   };
-  const popular=[...data.interest].sort((a,b)=>b.views-a.views || a.name.localeCompare(b.name));
-  const listings=rows=>reportTable(['Product','Published','Views','WhatsApp clicks'],
-    rows.map(row=>[byName(row),row.published_at?.slice(0,10)||'—',row.views,row.clicks]),2);
+  const least=sort==='least';
+  const listings=[...data.interest].sort((a,b)=>(least?a.views-b.views:b.views-a.views) || a.name.localeCompare(b.name));
   return {
-    metrics:[['Product views',total(popular,'views')],['WhatsApp clicks',total(popular,'clicks')],['Active listings',popular.length]],
-    results:reportPanel('Most-viewed active listings',listings(popular))+
-      reportPanel('Least-viewed active listings',listings([...popular].reverse()))
+    metrics:[['Product views',total(listings,'views')],['WhatsApp clicks',total(listings,'clicks')],['Active listings',listings.length]],
+    results:listings.length?reportPanel(least?'Least-viewed active listings':'Most-viewed active listings',
+      reportTable(['Product','Published','Views','Units sold','WhatsApp clicks'],
+        listings.map(row=>[byName(row),row.published_at?.slice(0,10)||'—',row.views,row.units_sold??0,row.clicks]),2)):''
   };
 }
 async function renderDashboard(body,params) {
@@ -972,11 +986,11 @@ async function renderDashboard(body,params) {
   const title=reportViews.find(([key])=>key===view)[1];
   const days=overviewDays(params.get('days'));
   const compare=view==='sales'||view==='themes';
-  const dated=view!=='aging' && view!=='damage';
+  const dated=view!=='damage';
   body.innerHTML=workspaceHeading('Reports')+
     subnav('Reports',reportViews,view,params.has('days')?{days}:{})+
     `<h2>${esc(title)}</h2><div id="report-metrics" aria-live="polite"></div>
-    <div class="frame report-filters"><form id="daterange" class="controls">
+    <div id="report-above"></div><div class="frame report-filters" hidden><form id="daterange" class="filter-grid">
     ${dated?`<label>Period<select name="preset">
       ${[['7','Last 7 days'],['30','Last 30 days'],['90','Last 90 days'],['3m','Last three calendar months'],['month','This month'],['custom','Custom dates']].map(([key,label])=>option(key,label,days)).join('')}
     </select></label>
@@ -986,36 +1000,48 @@ async function renderDashboard(body,params) {
     ${view==='sales'?`<label>Group results<select name="group"><option value="day">Day</option><option value="week">Week</option><option value="month">Month</option></select></label>`:''}
     ${view==='closeout'?field('sku','SKU','','text','placeholder="All SKUs"'):''}
     ${view==='damage'?`<label>Status<select name="status"><option value="">All statuses</option><option value="open">Open</option><option value="resolved">Resolved</option></select></label>`:''}
-    ${button('Apply filters')}</form></div><div id="report" aria-live="polite"></div>`;
+    ${view==='storefront'?'<label>Sort by<select name="sort"><option value="most">Most viewed</option><option value="least">Least viewed</option></select></label>':''}
+    <div class="form-action">${button('Apply filters')}</div></form></div><div id="report" aria-live="polite"></div>`;
   const form=$('#daterange',body);
   const metrics=$('#report-metrics',body);
   const target=$('#report',body);
+  const above=$('#report-above',body);
+  const filterPanel=form.closest('.report-filters');
   if (view==='sales') form.elements.group.value=days===7?'day':'week';
   let version=0;
   async function refresh() {
     const request=++version;
     target.innerHTML=empty('Loading report…');
     metrics.innerHTML='';
+    above.innerHTML='';
     try {
       const query=new URLSearchParams(format(form));
       if (view==='damage') {
         query.set('report','1');
         if (form.dataset.page) query.set('page',form.dataset.page);
       }
-      if (view==='aging'||view==='low') query.set('summary','1');
       const data=await api((view==='damage'?'/api/staff/issues?':'/api/staff/dashboard?')+query);
       if (request!==version) return;
       if (view==='damage') {
         metrics.innerHTML=reportMetrics([['Matching reports',data.counts.total],['Open',data.counts.open],['Resolved',data.counts.resolved]]);
-        renderIssueCards(target,data.items,refresh);
+        const hasData=data.counts.total>0;
+        if (data.items.length) {
+          renderIssueCards(target,data.items,refresh);
+        } else {
+          target.innerHTML=filterPanel.hidden&&!hasData?'':'<p class="small">No damage reports match these filters.</p>';
+        }
         paginate(target,data,next=>{
           form.dataset.page=String(next);
           return refresh();
         });
+        filterPanel.hidden=filterPanel.hidden&&!hasData;
       } else {
-        const report=drawReport(view,data);
+        const report=drawReport(view,data,query.get('sort'));
+        const hasHistory=(view==='sales'||view==='themes') ? data.hasSales : view==='closeout' && data.hasStockHistory;
+        filterPanel.hidden=view!=='storefront' && filterPanel.hidden && !report.results && !hasHistory;
         metrics.innerHTML=reportMetrics(report.metrics);
-        target.innerHTML=report.results;
+        above.innerHTML=report.above??'';
+        target.innerHTML=report.results || (filterPanel.hidden?'':'<p class="small">No records match these filters.</p>');
       }
     } catch(error) { if (request===version) target.innerHTML=empty(error.message); }
   }
