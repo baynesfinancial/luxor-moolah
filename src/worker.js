@@ -187,6 +187,17 @@ const homepageRules={
   clearance:{size:1,limit:3,where:'p.discount=1 AND p.sale_price<p.price',order:'p.clearance_started_at,p.sku'}
 };
 const homepageAvailable=`${publicStock} AND s.on_hand>s.reserved`;
+function relatedProducts(db,item) {
+  return db.all(`${catalogSelect}
+    WHERE ${homepageAvailable} AND p.sku<>?
+    ORDER BY (SELECT COUNT(*) FROM product_themes candidate JOIN product_themes source USING(theme_key)
+      WHERE candidate.sku=p.sku AND source.sku=?) DESC,
+      COALESCE(p.type_id=?,0) DESC,
+      (SELECT COUNT(*) FROM product_categories candidate JOIN product_categories source USING(category_id)
+      WHERE candidate.sku=p.sku AND source.sku=?) DESC,
+      p.published_at DESC,p.sku
+    LIMIT 4`,item.sku,item.sku,item.type_id,item.sku);
+}
 async function shopHome(db,manager=false) {
   const sections=Object.keys(homepageRules);
   const [featured,pins,...candidates]=await db.batch([
@@ -378,7 +389,10 @@ async function api(request,env,db,url) {
   if (path === '/api/catalog' && method === 'GET') return json(await catalog(db,url,null));
   if (path === '/api/shop-home' && method === 'GET') return json(await shopHome(db));
   const product = path.match(/^\/api\/product\/([^/]+)$/);
-  if (product && method === 'GET') return json(await itemDetail(db,skuOf(decodeURIComponent(product[1])),null));
+  if (product && method === 'GET') {
+    const item = await itemDetail(db,skuOf(decodeURIComponent(product[1])),null);
+    return json({...item,related:await relatedProducts(db,item)});
+  }
   if (path === '/api/events' && method === 'POST') {
     const input = await request.json();
     const sku = skuOf(input.sku);

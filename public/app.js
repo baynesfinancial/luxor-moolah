@@ -133,16 +133,16 @@ async function renderShop() {
   main.innerHTML=`<div class="storefront-home"><section class="storefront-hero"><div class="shell storefront-hero-grid${hero?'':' storefront-hero-simple'}">
     <div class="storefront-hero-copy"><h1>Small batches.<br><em>One-of-a-kind finds.</em></h1>
     <p>Gifts and everyday favorites in limited quantities. See what’s in the shop today.</p>
-    <a href="#${anchor}" class="button gold">${featured.length?'Browse the featured edit':arrivals.length?'See what’s new':'Browse the shop'}</a></div>
+    <a href="#${anchor}" class="button gold">${featured.length?'Browse featured items':arrivals.length?'See new arrivals':'Browse the shop'}</a></div>
     ${hero?`<a class="storefront-hero-photo" href="/products/${encodeURIComponent(hero.sku)}">${img(hero.cover,hero.name)}<span>${esc(hero.name)}</span></a>`:''}</div></section>
     ${featured.length?`<section class="shell storefront-section" id="featured" aria-labelledby="featured-heading">
-      <div class="storefront-heading"><h2 id="featured-heading">The Featured Edit</h2><a href="#catalog">Shop all</a></div>
+      <div class="storefront-heading"><h2 id="featured-heading">${homepageLabels.featured}</h2><a href="#catalog">Shop all</a></div>
       <div class="cards storefront-featured">${featured.map(item=>productCard(item,false)).join('')}</div></section>`:''}
     ${arrivals.length?`<section class="storefront-arrivals storefront-section" id="just-in" aria-labelledby="arrivals-heading"><div class="shell">
-      <div class="storefront-heading"><h2 id="arrivals-heading">Just In</h2></div>
+      <div class="storefront-heading"><h2 id="arrivals-heading">${homepageLabels.arrivals}</h2></div>
       <div class="cards">${arrivals.map(item=>productCard(item,false)).join('')}</div></div></section>`:''}
     ${clearance.length?`<section class="shell storefront-last storefront-section" id="last-chance" aria-labelledby="clearance-heading">
-      <div class="storefront-last-copy"><h2 id="clearance-heading">Last Chance</h2><p>Clearance finds, while they last.</p></div>
+      <div class="storefront-last-copy"><h2 id="clearance-heading">${homepageLabels.clearance}</h2><p>Clearance finds, while they last.</p></div>
       <div class="cards">${clearance.map(item=>productCard(item,false)).join('')}</div></section>`:''}
     <section class="shell storefront-section" id="catalog"><h2>Shop the collection</h2>${catalogFilters()}</section></div>`;
   wireCatalog();
@@ -162,6 +162,7 @@ function sendEvent(sku, kind) {
 }
 async function renderPublicProduct(sku) {
   const item=await api('/api/product/'+encodeURIComponent(sku));
+  const related=item.related ?? [];
   document.title=item.name+' | Luxor Moolah';
   const message=`Hi! I'm interested in ${item.name} (${item.sku}). ${location.origin}/products/${encodeURIComponent(item.sku)}`;
   main.innerHTML=`<div class="shell section"><a class="small" href="/#catalog">← Back to the shop</a>
@@ -171,7 +172,11 @@ async function renderPublicProduct(sku) {
       ${item.original_price!=null?`<del aria-label="Original price ${esc(price(item.original_price))}">${esc(price(item.original_price))}</del>`:''}</p>
     <p class="small">SKU ${esc(item.sku)}</p>${item.description?`<p>${esc(item.description)}</p>`:''}
     ${meta.whatsapp?`<a class="button" id="whatsapp" href="${esc(waLink(meta.whatsapp,message))}" rel="noopener noreferrer" target="_blank">Ask on WhatsApp ↗</a>`: ''}
-    </section></div></div>`;
+    </section></div>
+    ${related.length?`<section class="section" aria-labelledby="related-heading">
+      <div class="storefront-heading"><h2 id="related-heading">You May Also Like</h2></div>
+      <div class="cards">${related.map(product=>productCard(product,false)).join('')}</div>
+    </section>`:''}</div>`;
   wireGallery(item);
   try {
     const key='view:'+item.sku;
@@ -191,7 +196,7 @@ function signIn() {
 }
 const staffLink = (tab,values={}) => '/staff?'+new URLSearchParams({tab,...values});
 const managerSections = [['Overview','▦'],['Orders','▤'],['Customers','◇'],['Inventory','▧'],['Reports','▥'],['Team','○']];
-const homepageLabels={featured:'Featured',arrivals:'Just In',clearance:'Last Chance'};
+const homepageLabels={featured:'Featured Items',arrivals:'New Arrivals',clearance:'Last Chance'};
 let attentionRevision=0;
 
 function switchWorkspaceView(view) {
@@ -373,11 +378,12 @@ async function renderInventoryPage(body,params) {
 async function renderHomepagePicks(target) {
   const {display,assignments,overrides,pinned,choices}=await api('/api/staff/homepage-picks');
   const sections=[
-    {key:'featured',title:'Featured',slots:5,hint:'The first three available picks appear. The remaining picks are backups.'},
-    {key:'arrivals',title:'Just In',slots:4,hint:'The first two eligible pins appear. Open spots use the newest available listings published in the past 14 days.'},
-    {key:'clearance',title:'Last Chance',slots:3,hint:'The first eligible pin appears. The automatic pick is the available item that has been on clearance the longest.'}
+    {key:'featured',slots:5,hint:'The first three available picks appear. The remaining picks are backups.'},
+    {key:'arrivals',slots:4,hint:'The first two eligible pins appear. Open spots use the newest available listings published in the past 14 days.'},
+    {key:'clearance',slots:3,hint:'The first eligible pin appears. The automatic pick is the available item that has been on clearance the longest.'}
   ];
-  target.innerHTML=`<h2>Homepage picks</h2>${sections.map(({key,title,slots,hint})=>{
+  target.innerHTML=`<h2>Homepage picks</h2>${sections.map(({key,slots,hint})=>{
+    const title=homepageLabels[key];
     const featured=key==='featured';
     const selected=featured?assignments:overrides.filter(row=>row.section===key);
     const eligible=featured?selected.filter(row=>choices[key].some(item=>item.sku===row.sku)):pinned.filter(row=>row.section===key);
