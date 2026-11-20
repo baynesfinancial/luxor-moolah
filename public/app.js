@@ -235,8 +235,8 @@ async function openStaff() {
     if (requested==='Damage reports') params.set('view','damage');
     if (requested==='Categories') params.set('view','categories');
   }
-  const tabs=manager?managerSections:[['Inventory','▧'],['My sales','▤']];
-  let tab=(manager?aliases[requested]:null)||requested;
+  const tabs=manager?managerSections:[['Inventory','▧'],['Sales','▤']];
+  let tab=manager?(aliases[requested]||requested):requested==='My sales'?'Sales':requested;
   if (manager && tab==='Reports' && ['low','aging'].includes(params.get('view'))) tab='Inventory';
   activeTab=tabs.some(section=>section[0]===tab)?tab:sku?'Inventory':tabs[0][0];
   document.body.classList.add('staff-workspace');
@@ -305,7 +305,7 @@ async function loadTab(tab,sku=null,params=new URLSearchParams(location.search))
       if (staff.role==='manager') return await renderInventoryPage(body,params);
       return await renderStaffInventory(body);
     }
-    if (tab==='My sales') return await renderSales(body);
+    if (tab==='Sales') return await renderSales(body);
     if (tab==='Orders') {
       if (params.has('order')) return await renderOrders(body,params.get('order'),params.get('view'));
       return await renderOrdersPage(body,params.get('view'));
@@ -753,7 +753,7 @@ async function renderSales(body,view) {
   const sales=await api('/api/staff/sales'+(view?'?view='+view:''));
   const manager=staff.role==='manager';
   const pendingCount=sales.filter(sale=>sale.status==='pending').length;
-  body.innerHTML=`${manager?'':workspaceHeading('My sales')}
+  body.innerHTML=`${manager?'':workspaceHeading('Sales')}
     ${manager && pendingCount>1?`<details class="frame"><summary>Close selected items as one order</summary>
       <p class="small">Select the pending items below and enter each selling price. Use the same sale date for all items.</p>
       <form id="close-order" class="formgrid">${customerPicker()}
