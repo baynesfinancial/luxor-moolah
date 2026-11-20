@@ -69,6 +69,9 @@ function saveProduct(db, sku, item, state, existing) {
       sku,item.name,item.description,item.type,item.price,null,0,state,state);
   const statements = [write, db.sql('DELETE FROM product_categories WHERE sku=?',sku),
     ...item.audience.map(category => db.sql('INSERT INTO product_categories VALUES(?,?)',sku,category))];
+  if (item.personalNote !== undefined) {
+    statements.push(db.sql('UPDATE products SET personal_note=? WHERE sku=?',item.personalNote,sku));
+  }
   if (item.themes) {
     statements.push(db.sql('DELETE FROM product_themes WHERE sku=?',sku),
       ...item.themes.map(([key,theme])=>db.sql('INSERT INTO product_themes VALUES(?,?,?)',sku,key,theme)));
@@ -125,11 +128,16 @@ async function itemDetail(db, sku, user) {
   assert(item,'Item unavailable.',404);
   item.photos = await db.all('SELECT id FROM photos WHERE sku=? ORDER BY position,id',sku);
   if (user?.role === 'manager') {
-    Object.assign(item,await db.one('SELECT price,sale_price,discount,state FROM products WHERE sku=?',sku));
+    Object.assign(item,await db.one('SELECT price,sale_price,discount,state,personal_note FROM products WHERE sku=?',sku));
     item.themes = (await db.all('SELECT theme FROM product_themes WHERE sku=? ORDER BY theme_key',sku))
       .map(row=>row.theme).join(', ');
-    Object.assign(item,await db.one(`SELECT EXISTS(SELECT 1 FROM batches WHERE sku=?) AS has_stock_history,
-      (SELECT on_hand FROM stock WHERE sku=?) AS on_hand`,sku,sku));
+    item.batches = await db.all(`SELECT b.id,b.received_on,b.cost,balances.on_hand
+      FROM batches b JOIN batch_balances balances ON balances.id=b.id WHERE b.sku=? ORDER BY b.rowid`,sku);
+    item.has_stock_history = item.batches.length > 0;
+    item.on_hand = item.batches.reduce((sum,batch)=>sum+batch.on_hand,0);
+    item.adjustments = await db.all(`SELECT m.batch_id,m.qty,m.effective_on,m.reason,m.note,u.email AS actor_email
+      FROM movements m JOIN batches b ON b.id=m.batch_id LEFT JOIN users u ON u.id=m.actor
+      WHERE b.sku=? AND m.kind='adjust' ORDER BY m.created_at DESC,m.rowid DESC`,sku);
   }
   if (user?.role === 'employee') {
     const state = await db.one('SELECT state FROM products WHERE sku=?',sku);
@@ -443,19 +451,18 @@ async function api(request,env,db,url) {
       FROM products p JOIN stock s USING(sku) WHERE p.sku=?`,sku);
     assert(existingSku ? existing : !existing, existingSku ? 'Product unavailable.' : 'This SKU already exists.',409);
     const item = await productPayload(db,input);
+    if (input.personal_note !== undefined) item.personalNote=clean(input.personal_note,4000);
     const state = input.state ?? 'draft';
     assert(['draft','active','archived'].includes(state),'Select a listing status.');
     const openingQuantity=units(input.quantity,true)??0;
     const unitCost=money(input.unit_cost);
-    const received=date(input.received_on,true)??today;
     if (openingQuantity) {
       assert(!existing?.has_stock_history,'Starting stock is already recorded for this SKU.',409);
       assert(unitCost!=null,'Enter the cost per unit.');
-      transactionDay(received,today);
     }
     validateListing(item,state,existing,openingQuantity);
     const statements = [...saveProduct(db,sku,item,state,existing),
-      ...addStock(db,user,sku,openingQuantity,unitCost,received,today,null,`opening:${sku}`),
+      ...addStock(db,user,sku,openingQuantity,unitCost,today,today,null,`opening:${sku}`),
       ...await photoStatements(db,user,input.photos ?? [],sku)];
     if (Array.isArray(input.photo_order)) {
       for (const [position,image] of input.photo_order.slice(0,100).entries()) {
@@ -473,8 +480,8 @@ async function api(request,env,db,url) {
     const sku = skuOf(input.sku);
     const count = units(input.quantity);
     assert(count > 0,'Enter at least one unit.');
-    const received = date(input.received_on,true);
-    if (received) transactionDay(received,today);
+    assert(await db.one('SELECT 1 FROM products WHERE sku=?',sku),'Product unavailable.',404);
+    const received = transactionDay(date(input.received_on,true)??today,today);
     await db.batch([...addStock(db,user,sku,count,money(input.unit_cost),received,today,clean(input.note,500)),
       audit(db,user,'stock.receive',sku,String(count))]);
     return json({});
@@ -483,11 +490,16 @@ async function api(request,env,db,url) {
     const batch = await db.one('SELECT * FROM batch_balances WHERE id=?',input.batch ?? '');
     assert(batch,'Batch unavailable.',404);
     const count = units(input.quantity);
-    const reason = clean(input.note,500);
-    assert(count && reason,'Enter a quantity and reason.');
-    await db.batch([db.sql("INSERT INTO movements(id,batch_id,kind,qty,effective_on,actor,note) VALUES(?,?,'adjust',?,?,?,?)",
-      id(),batch.id,input.direction==='add' ? count : -count,today,user.id,reason),
-      audit(db,user,'stock.adjust',batch.sku,reason)]);
+    assert(count>0,'Enter at least one unit.');
+    assert(['add','remove'].includes(input.direction),'Select a stock change.');
+    const reason = input.reason;
+    assert(['damaged','missing','miscount','other'].includes(reason),'Select an adjustment reason.');
+    const details = clean(input.note,500);
+    assert(reason!=='other' || details,'Enter details for this adjustment.');
+    const change = input.direction==='add' ? count : -count;
+    await db.batch([db.sql("INSERT INTO movements(id,batch_id,kind,qty,effective_on,actor,reason,note) VALUES(?,?,'adjust',?,?,?,?,?)",
+      id(),batch.id,change,today,user.id,reason,details||null),
+      audit(db,user,'stock.adjust',batch.sku,`${change} · ${reason}${details ? ` · ${details}` : ''}`)]);
     return json({});
   }
   const review = path.match(/^\/api\/staff\/sales\/([a-f0-9-]+)\/review$/);

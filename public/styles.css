@@ -117,3 +117,8 @@ label,.field{display:grid;gap:6px;font-size:.87rem;font-weight:650;align-content
 .photo-queue{display:grid;gap:6px;list-style:none;padding:0;margin:6px 0 0}
 .photo-queue:empty{display:none}
 .photo-queue li{display:flex;align-items:center;justify-content:space-between;gap:10px;overflow-wrap:anywhere}
+.stock-history{margin:12px 0 0;padding:0;list-style:none}
+.stock-history li{padding:12px 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
+.stock-history li:last-child{border-bottom:0}
+.stock-history span{display:block;margin-top:4px}
+.stock-history p{margin:6px 0 0;white-space:pre-wrap}
