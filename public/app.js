@@ -346,6 +346,28 @@ function productPhotoPicker(form) {
     return entry.upload;
   }));
 }
+function wirePhotoOrder(form) {
+  const row=$('[data-photo-order]',form);
+  if (!row) return;
+  const cards=[...row.children];
+  row.addEventListener('change',event=>{
+    const control=event.target.closest('select[data-order]');
+    if (!control) return;
+    const card=control.closest('[data-position]');
+    const from=Number(card.dataset.position)-1;
+    const to=Number(control.value)-1;
+    if (from===to) return;
+    const other=cards[to];
+    [cards[from],cards[to]]=[other,card];
+    other.dataset.position=String(from+1);
+    $('select',other).value=String(from+1);
+    $('img',other).alt=`Photo ${from+1}`;
+    card.dataset.position=String(to+1);
+    $('img',card).alt=`Photo ${to+1}`;
+    row.append(...cards);
+    control.focus();
+  });
+}
 function renderProductEditor(target,item) {
   const openingStock=item?.has_stock_history?'':`
     ${field('quantity','Starting units','','number',`min="1" step="1" ${item?'':'required'}`)}
@@ -357,11 +379,12 @@ function renderProductEditor(target,item) {
     ${itemFields(item?{...item,price:amount(item.price),categories:list(item.categories)}:{},!!item,{openingStock,personalNote})}
     <label>Listing status<select name="state">${['draft','active','archived'].map(state=>option(state,state,item?.state)).join('')}</select></label>
     ${photoField()}<div class="span"><small>Choose photos in one or more selections. You can add more in Edit item after saving.</small>
-      <ul class="photo-queue" data-photo-queue aria-live="polite"></ul></div>${item?.photos?.length?`<fieldset class="span"><legend>Current photos</legend><div class="photo-row">${item.photos.map((photo,index)=>
-    `<div>${img(photo.id,'Photo '+(index+1),'issue-img')}<label>Order<input data-order="${photo.id}" type="number" min="1" value="${index+1}"></label><label><input name="remove" type="checkbox" value="${photo.id}">Remove</label></div>`).join('')}</div></fieldset>`:''}
+      <ul class="photo-queue" data-photo-queue aria-live="polite"></ul></div>${item?.photos?.length?`<fieldset class="span"><legend>Current photos</legend><div class="photo-row" data-photo-order>${item.photos.map((photo,index)=>
+    `<div data-position="${index+1}">${img(photo.id,'Photo '+(index+1),'issue-img')}<label>Order<select data-order="${esc(photo.id)}">${item.photos.map((_,position)=>option(position+1,position+1,index+1)).join('')}</select></label><label><input name="remove" type="checkbox" value="${esc(photo.id)}">Remove</label></div>`).join('')}</div></fieldset>`:''}
     <div class="span">${button('Save item')}</div></form></div>`;
   const form=$('#product-form',target);
   const uploadPhotos=productPhotoPicker(form);
+  wirePhotoOrder(form);
   formHandler(form,async(data,form)=>{
     normalizeItem(data,form);
     if (data.state==='active' && data.price==='') throw new Error('Enter a selling price before publishing.');
@@ -371,7 +394,7 @@ function renderProductEditor(target,item) {
     if (Number(data.quantity)>0 && data.unit_cost==='') throw new Error('Enter the cost per unit.');
     data.existing_sku=item?.sku;
     data.photos=await uploadPhotos();
-    data.photo_order=$$('[data-order]',form).sort((a,b)=>Number(a.value)-Number(b.value)).map(field=>field.dataset.order);
+    data.photo_order=$$('[data-order]',form).map(field=>field.dataset.order);
     data.remove_photos=new FormData(form).getAll('remove');
     const result=await api('/api/staff/product',data);
     notify('Item saved.');
@@ -418,9 +441,9 @@ async function renderStaffProduct(body,sku) {
     ${item.available>0?`<div class="frame"><h3>Record a sale</h3><form id="sell" class="formgrid">
     ${field('quantity','Units',1,'number',`min="1" max="${item.available}" required`)}
     ${field('sold_on','Sale date',meta.today,'date','required')}
-    ${manager?field('unit_price','Actual price per unit',amount(item.display_price),'number','min="0" step="0.01"'):''}
+    ${manager?field('unit_price','Actual price per unit',amount(item.display_price),'number','min="0" step="0.01" required'):''}
     ${manager?customerPicker():''}
-    <div class="span controls">${button('Submit for review')}${manager?'<button class="button secondary" value="direct">Approve now</button>':''}</div></form></div>`:''}
+    <div class="span controls">${button(manager?'Record and approve sale':'Submit for review')}</div></form></div>`:''}
     ${manager?'':`<details class="frame"><summary>Report a damaged item</summary><form id="issue" class="formgrid">${text('note','What happened?')}${photoField(false)}
     <div class="span">${button('Send report')}</div></form></details>`}
     ${manager?`<details class="frame"><summary>Edit item</summary><div id="product-editor"></div></details>
@@ -433,9 +456,9 @@ async function renderStaffProduct(body,sku) {
   wireGallery(item);
   const reload=()=>loadTab('Inventory',item.sku);
   if (manager && $('#sell')) wireCustomerPicker($('#sell'));
-  if ($('#sell')) formHandler($('#sell'),async(data,form,submit)=>{
-    await api('/api/staff/sales',{...data,sku:item.sku,direct:submit?.value==='direct'});
-    notify(submit?.value==='direct'?'Sale approved.':'Sale submitted.');
+  if ($('#sell')) formHandler($('#sell'),async data=>{
+    await api('/api/staff/sales',{...data,sku:item.sku});
+    notify(manager?'Sale approved.':'Sale submitted.');
     await reload();
   });
   if ($('#issue')) formHandler($('#issue'),async(data,form)=>{

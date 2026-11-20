@@ -315,8 +315,9 @@ async function api(request,env,db,url) {
     assert(await db.one("SELECT 1 FROM products WHERE sku=? AND state='active'",sku),'That product is unavailable.',404);
     const sale = id();
     const statements = [db.sql('INSERT INTO sales(id,sku,quantity,sold_on,submitted_by) VALUES(?,?,?,?,?)',sale,sku,quantity,soldOn,user.id)];
-    if (input.direct) {
-      requireManager(user);
+    if (input.direct) requireManager(user);
+    const approve = user.role === 'manager';
+    if (approve) {
       const customer = await customerId(db,input.customer_id);
       const order = id();
       statements.push(db.sql('INSERT INTO orders(id,customer_id,sold_on,closed_by) VALUES(?,?,?,?)',order,customer,soldOn,user.id),
@@ -324,7 +325,7 @@ async function api(request,env,db,url) {
           order,money(input.unit_price),user.id,sale),
         audit(db,user,'order.closed',order));
     }
-    statements.push(audit(db,user,input.direct ? 'sale.direct' : 'sale.submit',sale));
+    statements.push(audit(db,user,approve ? 'sale.direct' : 'sale.submit',sale));
     await db.batch(statements);
     return json({id:sale},201);
   }
@@ -464,13 +465,17 @@ async function api(request,env,db,url) {
     const statements = [...saveProduct(db,sku,item,state,existing),
       ...addStock(db,user,sku,openingQuantity,unitCost,today,today,null,`opening:${sku}`),
       ...await photoStatements(db,user,input.photos ?? [],sku)];
-    if (Array.isArray(input.photo_order)) {
-      for (const [position,image] of input.photo_order.slice(0,100).entries()) {
-        statements.push(db.sql('UPDATE photos SET position=? WHERE sku=? AND id=?',position,sku,image));
-      }
-    }
     if (Array.isArray(input.remove_photos)) {
       for (const image of input.remove_photos.slice(0,100)) statements.push(db.sql('DELETE FROM photos WHERE id=? AND sku=?',image,sku));
+    }
+    if (Array.isArray(input.photo_order) && input.photo_order.length) {
+      statements.push(db.sql(`WITH requested AS (
+        SELECT value AS id, MIN(key) AS priority FROM json_each(?) GROUP BY value
+      ), ranked AS MATERIALIZED (
+        SELECT p.id, ROW_NUMBER() OVER (ORDER BY r.priority IS NULL,r.priority,p.position,p.id)-1 AS position
+        FROM photos p LEFT JOIN requested r ON r.id=p.id WHERE p.sku=?
+      ) UPDATE photos SET position=ranked.position FROM ranked WHERE photos.id=ranked.id`,
+      JSON.stringify(input.photo_order),sku));
     }
     statements.push(audit(db,user,existing ? 'product.update' : 'product.create',sku,state));
     await db.batch(statements);
