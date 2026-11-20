@@ -199,7 +199,12 @@ async function renderPublicProduct(sku) {
     <h1 class="display">${esc(item.name)}</h1><p class="price storefront-price">${esc(price(item.display_price))}
       ${item.original_price!=null?`<del aria-label="Original price ${esc(price(item.original_price))}">${esc(price(item.original_price))}</del>`:''}</p>
     <p class="small">SKU ${esc(item.sku)}</p>${item.description?`<p>${esc(item.description)}</p>`:''}
-    ${meta.whatsapp?`<a class="button" id="whatsapp" href="${esc(waLink(meta.whatsapp,message))}" rel="noopener noreferrer" target="_blank">Ask on WhatsApp ↗</a>`: ''}
+    <div class="controls">
+      ${meta.whatsapp?`<a class="button" id="whatsapp" href="${esc(waLink(meta.whatsapp,message))}" rel="noopener noreferrer" target="_blank">Ask on WhatsApp ↗</a>`:''}
+      ${meta.instagram?`<a class="button secondary" href="https://ig.me/m/${encodeURIComponent(meta.instagram)}" rel="noopener noreferrer" target="_blank">Instagram DM ↗</a>`:''}
+      ${meta.messenger?`<a class="button secondary" href="https://m.me/${encodeURIComponent(meta.messenger)}?text=${encodeURIComponent(message)}" rel="noopener noreferrer" target="_blank">Messenger ↗</a>`:''}
+    </div>
+    ${meta.instagram?'<p><button class="button secondary" type="button" id="copy-item-details">Copy item details</button></p>':''}
     </section></div>
     ${related.length?`<section class="section" aria-labelledby="related-heading">
       <div class="storefront-heading"><h2 id="related-heading">You May Also Like</h2></div>
@@ -211,6 +216,10 @@ async function renderPublicProduct(sku) {
     if (!sessionStorage.getItem(key)) { sessionStorage.setItem(key,'1'); sendEvent(item.sku,'view'); }
   } catch { sendEvent(item.sku,'view'); }
   $('#whatsapp')?.addEventListener('click',()=>sendEvent(item.sku,'whatsapp'));
+  $('#copy-item-details')?.addEventListener('click',async()=>{
+    try { await navigator.clipboard.writeText(message); notify('Item details copied. Paste them into your message.'); }
+    catch { notify('Copy was unavailable. You can share the SKU shown above.'); }
+  });
 }
 function signIn() {
   const params=new URLSearchParams(location.search);
@@ -280,7 +289,7 @@ function renderPasswordReset() {
   bindPasswordForm('/api/auth/reset-password',token);
 }
 const staffLink = (tab,values={}) => '/staff?'+new URLSearchParams({tab,...values});
-const managerSections = [['Overview','▦'],['Orders','▤'],['Customers','◇'],['Inventory','▧'],['Reports','▥'],['Team','○']];
+const managerSections = [['Overview','▦'],['Orders','▤'],['Customers','◇'],['Inventory','▧'],['Reports','▥'],['Team','○'],['Settings','⚙']];
 const homepageLabels={featured:'Featured Items',arrivals:'New Arrivals',clearance:'Last Chance'};
 let attentionRevision=0;
 
@@ -389,9 +398,32 @@ async function loadTab(tab,sku=null,params=new URLSearchParams(location.search))
     }
     if (tab==='Customers') return await renderCustomers(body,params.get('customer'));
     if (tab==='Team') return await renderTeam(body);
+    if (tab==='Settings') return await renderStoreSettings(body);
     if (tab==='Reports') return await renderDashboard(body,params);
     return await renderOverview(body,params);
   } catch (error) { body.innerHTML=empty(error.message); }
+}
+async function renderStoreSettings(body) {
+  const path='/api/staff/store-contact';
+  const contact=await api(path);
+  body.innerHTML=workspaceHeading('Settings')+`<section class="frame">
+    <h2>Storefront messaging</h2>
+    <p class="small" id="contact-help">These contacts appear on product pages. Include the country code for WhatsApp. Leave a field blank to hide that button.</p>
+    <form id="store-contact" aria-describedby="contact-help">
+      <div class="formgrid">
+        ${field('whatsapp','WhatsApp number',contact.whatsapp,'tel','placeholder="+592 636 6630" autocomplete="off" maxlength="40"')}
+        ${field('instagram','Instagram username or profile link',contact.instagram,'text','autocapitalize="none" autocomplete="off" maxlength="300"')}
+        ${field('messenger','Facebook Page username or link',contact.messenger,'text','autocapitalize="none" autocomplete="off" maxlength="300"')}
+      </div>${button('Save messaging settings')}
+    </form></section>`;
+  formHandler($('#store-contact',body),async(values,form)=>{
+    const saved=await api(path,values);
+    Object.assign(meta,saved);
+    for (const [name,value] of Object.entries(saved)) {
+      if (form.elements[name].value===values[name]) form.elements[name].value=value;
+    }
+    notify('Storefront messaging settings saved.');
+  });
 }
 async function renderStaffInventory(body,listView=false) {
   const recent=await api('/api/staff/recent');

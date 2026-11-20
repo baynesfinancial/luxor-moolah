@@ -3,6 +3,7 @@ import { buildAuth, seedAdmin, staffSession } from './auth.js';
 import { dashboard } from './dashboard.js';
 import { deletionPreview, deleteRecord } from './cleanup.js';
 import { searchCustomers, createCustomer, customerId, customerDetail, listOrders, orderDetail, listReturns } from './customers.js';
+import { storeContact, contactValues, saveStoreContact } from './store-contact.js';
 
 const id = () => crypto.randomUUID();
 const json = (value, status = 200, headers = {}) => Response.json(value, {
@@ -389,8 +390,8 @@ async function api(request,env,db,url) {
     return auth.handler(request);
   }
   if (path === '/api/meta' && method === 'GET') {
-    return json({categories:await db.all('SELECT * FROM categories ORDER BY id'),
-      currency:env.STORE_CURRENCY ?? 'GYD',whatsapp:env.STORE_WHATSAPP ?? '5926366630',today});
+    const [categories,contact]=await Promise.all([db.all('SELECT * FROM categories ORDER BY id'),storeContact(db,env)]);
+    return json({categories,currency:env.STORE_CURRENCY ?? 'GYD',...contact,today});
   }
   if (path === '/api/catalog' && method === 'GET') return json(await catalog(db,url,null));
   if (path === '/api/shop-home' && method === 'GET') return json(await shopHome(db));
@@ -423,6 +424,13 @@ async function api(request,env,db,url) {
     const credential=await db.one(`SELECT 1 FROM "account" a JOIN "user" linked ON linked.id=a.userId
       WHERE linked.email=? AND a.providerId='credential' AND a.password IS NOT NULL`,user.email);
     return json({...user,has_password:Boolean(credential),can_manage_admins:canManageAdmins,staff_whatsapp:env.STAFF_WHATSAPP || ''});
+  }
+  if (path === '/api/staff/store-contact' && ['GET','POST'].includes(method)) {
+    requireManager(user);
+    if (method==='GET') return json(await storeContact(db,env));
+    const contact=contactValues(await request.json());
+    await saveStoreContact(db,contact,audit(db,user,'store.contact.update','storefront'));
+    return json(contact);
   }
   if (path === '/api/staff/password' && method === 'POST') {
     const {newPassword}=await request.json();
