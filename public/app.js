@@ -86,19 +86,24 @@ async function selectedPhotos(form) {
 function waLink(phone,message) {
   return `https://wa.me/${String(phone).replace(/\D/g,'')}?text=${encodeURIComponent(message)}`;
 }
-function catalogFilters() {
-  return `<form class="filters" id="filters"><label class="filter-search">Search
-      <input name="q" type="search" placeholder="Try a product name or SKU" autocomplete="off">
-    </label><label>Category<select name="audience">${options('audience',null,'All categories')}</select></label>
-    <label>Product type<select name="type">${options('type',null,'All product types')}</select></label></form>
+function catalogFilters({storefront=false,clearance=false}={}) {
+  const type=`<label>Product type<select name="type">${options('type',null,'All product types')}</select></label>`;
+  const category=`<label>Category<select name="audience">${options('audience',null,'All categories')}</select></label>`;
+  return `<form class="filters${storefront?' storefront-filters':''}" id="filters">
+    ${clearance?'<input type="hidden" name="clearance" value="1">':''}
+    <label class="filter-search">${storefront?'Search products':'Search'}
+      <input name="q" type="search" placeholder="${storefront?'Try a name, type, or SKU':'Try a product name or SKU'}" autocomplete="off">
+    </label>
+    ${storefront?type+category:category+type}
+    ${storefront?button('Search'):''}</form>
     <div id="catalog-results" aria-live="polite"></div>`;
 }
-function productCard(p,isStaff) {
+function productCard(p,isStaff,layout='') {
   const link=isStaff?`/staff?sku=${encodeURIComponent(p.sku)}`:`/products/${encodeURIComponent(p.sku)}`;
   const availability=isStaff ? badge(`${Math.max(p.available,0)} available`) : p.available<=0?badge('Pending Sale',true):
     p.available===1?badge('Only 1 left',true):'';
   const type=`<span class="small">${esc(p.product_type || p.sku)}</span>`;
-  return `<a class="product-card" href="${link}">${p.cover?img(p.cover,p.name):blank(p.name)}
+  return `<a class="product-card${layout?' '+layout:''}" href="${link}">${p.cover?img(p.cover,p.name):blank(p.name)}
     <div class="product-copy">${isStaff?type:`<div class="storefront-card-meta">${type}${availability}</div>`}
     <h3>${esc(p.name)}</h3>${p.display_price!=null?`<p${isStaff?'':' class="storefront-price"'}>${esc(price(p.display_price))}
       ${!isStaff&&p.original_price!=null?`<del aria-label="Original price ${esc(price(p.original_price))}">${esc(price(p.original_price))}</del>`:''}</p>`:''}${isStaff?availability:''}</div></a>`;
@@ -115,19 +120,21 @@ function wireCatalog(isStaff=false) {
       const result=await api(`${isStaff?'/api/staff/catalog':'/api/catalog'}?${params}`);
       if (current!==revision || !target.isConnected) return;
       target.innerHTML=result.items.length ? `<div class="cards">${result.items.map(p=>productCard(p,isStaff)).join('')}</div>
-      <div class="actions section">${page>1?'<button id="previous" class="button secondary">Previous</button>':'<span></span>'}
-      ${result.next?'<button id="more" class="button secondary">Next products</button>':''}</div>` :
-        empty(isStaff?'No inventory items match this search.':'No products match this search.');
+      ${page>1||result.next?`<div class="actions section">${page>1?'<button id="previous" class="button secondary">Previous</button>':'<span></span>'}
+      ${result.next?'<button id="more" class="button secondary">Next products</button>':''}</div>`:''}` :
+        empty(isStaff?'No inventory items match this search.':params.has('clearance')?
+          'No available clearance items match this search.':'No products match this search.');
       $('#more',target)?.addEventListener('click',()=>load(page+1));
       $('#previous',target)?.addEventListener('click',()=>load(page-1));
     } catch (error) { if (current===revision) target.innerHTML=empty(error.message); }
   }
-  filters.addEventListener('submit',event=>{event.preventDefault();load();});
+  filters.addEventListener('submit',event=>{event.preventDefault();clearTimeout(delayed);load();});
   filters.addEventListener('input',()=>{clearTimeout(delayed);delayed=setTimeout(load,180);});
   load();
 }
 async function renderShop() {
   const {featured,arrivals,clearance}=await api('/api/shop-home').catch(()=>({featured:[],arrivals:[],clearance:[]}));
+  const clearanceOnly=new URLSearchParams(location.search).get('clearance')==='1';
   const hero=[...featured,...arrivals,...clearance].find(item=>item.cover);
   const anchor=featured.length?'featured':arrivals.length?'just-in':'catalog';
   main.innerHTML=`<div class="storefront-home"><section class="storefront-hero"><div class="shell storefront-hero-grid${hero?'':' storefront-hero-simple'}">
@@ -140,12 +147,17 @@ async function renderShop() {
       <div class="cards storefront-featured">${featured.map(item=>productCard(item,false)).join('')}</div></section>`:''}
     ${arrivals.length?`<section class="storefront-arrivals storefront-section" id="just-in" aria-labelledby="arrivals-heading"><div class="shell">
       <div class="storefront-heading"><h2 id="arrivals-heading">${homepageLabels.arrivals}</h2></div>
-      <div class="cards">${arrivals.map(item=>productCard(item,false)).join('')}</div></div></section>`:''}
-    ${clearance.length?`<section class="shell storefront-last storefront-section" id="last-chance" aria-labelledby="clearance-heading">
-      <div class="storefront-last-copy"><h2 id="clearance-heading">${homepageLabels.clearance}</h2><p>Clearance finds, while they last.</p></div>
-      <div class="cards">${clearance.map(item=>productCard(item,false)).join('')}</div></section>`:''}
-    <section class="shell storefront-section" id="catalog"><h2>Shop the collection</h2>${catalogFilters()}</section></div>`;
+      <div class="cards storefront-arrival-cards">${arrivals.map(item=>productCard(item,false)).join('')}</div></div></section>`:''}
+    ${clearance.length?`<section class="shell storefront-last" id="last-chance" aria-labelledby="clearance-heading">
+      <div class="storefront-last-copy"><h2 id="clearance-heading">${homepageLabels.clearance}</h2><p>Clearance finds, while they last.</p>
+      <a class="button gold" href="/?clearance=1#catalog">View all clearance picks</a></div>
+      ${productCard(clearance[0],false,'storefront-last-card')}</section>`:''}
+    <section class="shell storefront-section" id="catalog" aria-labelledby="catalog-heading">
+      <div class="storefront-heading"><h2 id="catalog-heading">${clearanceOnly?'Clearance picks':'Shop the collection'}</h2>
+      ${clearanceOnly?'<a href="/#catalog">View all products</a>':''}</div>
+      ${catalogFilters({storefront:true,clearance:clearanceOnly})}</section></div>`;
   wireCatalog();
+  if (location.hash==='#catalog') $('#catalog').scrollIntoView();
 }
 function gallery(item) {
   const ids=item.photos.map(photo=>photo.id);

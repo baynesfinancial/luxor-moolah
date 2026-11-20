@@ -10,6 +10,7 @@ const json = (value, status = 200, headers = {}) => Response.json(value, {
 });
 const migrationsHint = 'Database unavailable. Apply the D1 migrations before running the app.';
 const publicStock = "p.state='active' AND p.price IS NOT NULL AND s.on_hand>0";
+const clearancePrice = 'p.discount=1 AND p.sale_price<p.price';
 const displayPrice = 'CASE WHEN p.discount=1 AND p.sale_price IS NOT NULL THEN p.sale_price ELSE p.price END';
 const catalogSelect = `SELECT p.sku,p.name,p.description,${displayPrice} AS display_price,
  CASE WHEN p.discount=1 AND p.sale_price<p.price THEN p.price END AS original_price,
@@ -165,11 +166,13 @@ async function itemDetail(db, sku, user) {
 
 async function catalog(db,url,staff) {
   const where = [staff?.role === 'manager' ? '1=1' : staff ? "p.state='active'" : publicStock];
+  if (!staff && url.searchParams.get('clearance')==='1') where.push(clearancePrice,'s.on_hand>s.reserved');
   const params = [];
   const query = clean(url.searchParams.get('q'));
   if (query) {
-    where.push('(instr(lower(p.sku),lower(?))>0 OR instr(lower(p.name),lower(?))>0 OR instr(lower(p.description),lower(?))>0)');
-    params.push(query,query,query);
+    where.push(`(instr(lower(p.sku),lower(?))>0 OR instr(lower(p.name),lower(?))>0
+      OR instr(lower(p.description),lower(?))>0 OR instr(lower(t.name),lower(?))>0)`);
+    params.push(query,query,query,query);
   }
   for (const [param, expression] of [
     ['type','p.type_id=?'], ['audience','EXISTS(SELECT 1 FROM product_categories pc WHERE pc.sku=p.sku AND pc.category_id=?)']
@@ -184,7 +187,7 @@ async function catalog(db,url,staff) {
 
 const homepageRules={
   arrivals:{size:2,limit:4,where:"p.published_at>=datetime('now','-14 days')",order:'p.published_at DESC,p.sku'},
-  clearance:{size:1,limit:3,where:'p.discount=1 AND p.sale_price<p.price',order:'p.clearance_started_at,p.sku'}
+  clearance:{size:1,limit:3,where:clearancePrice,order:'p.clearance_started_at,p.sku'}
 };
 const homepageAvailable=`${publicStock} AND s.on_hand>s.reserved`;
 function relatedProducts(db,item) {
