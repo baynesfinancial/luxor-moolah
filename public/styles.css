@@ -29,8 +29,15 @@ label,.field{display:grid;gap:6px;font-size:.87rem;font-weight:650;align-content
 .workspace-heading h1{font-size:clamp(2.25rem,4.5vw,3.65rem)}
 .workspace-heading .controls{align-items:end}
 .workspace-heading .check{padding:11px 0}
-.workspace-view-controls{align-items:end}
+.workspace-view-controls label{display:flex;align-items:center;gap:8px}
+.workspace-view-controls select{width:7rem}
+.workspace-view-controls :is(select,.button){height:42px;padding-block:0}
 .workspace-view-controls .button:disabled{cursor:default}
+@media(max-width:400px){
+  .workspace-view-controls{align-items:end}
+  .workspace-view-controls label{display:grid;gap:6px}
+  .workspace-view-controls select{width:6rem}
+}
 .workspace-preview{padding:12px 14px;margin-bottom:16px;border:1px solid #dcc292;border-radius:8px;background:#fbefd4;color:#47301b}
 .workspace-preview p{margin:0}
 .workspace-subnav{display:flex;flex-wrap:wrap;gap:6px 20px;border-bottom:1px solid var(--line);margin-bottom:16px}
