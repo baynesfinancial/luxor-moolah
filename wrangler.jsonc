@@ -8,7 +8,7 @@
   "d1_databases": [{
     "binding": "DB",
     "database_name": "luxor-moolah",
-    "database_id": "00000000-0000-0000-0000-000000000000",
+    "database_id": "8078f7e9-d1ca-486b-9776-f081b7724d5f",
     "migrations_dir": "migrations"
   }],
   "r2_buckets": [{ "binding": "PHOTOS", "bucket_name": "luxor-moolah-photos" }],
