@@ -390,7 +390,7 @@ async function api(request,env,db,url) {
     return auth.handler(request);
   }
   if (path === '/api/meta' && method === 'GET') {
-    const [categories,contact]=await Promise.all([db.all('SELECT * FROM categories ORDER BY id'),storeContact(db,env)]);
+    const [categories,contact]=await Promise.all([db.all('SELECT * FROM categories ORDER BY id'),storeContact(db)]);
     return json({categories,currency:env.STORE_CURRENCY ?? 'GYD',...contact,today});
   }
   if (path === '/api/catalog' && method === 'GET') return json(await catalog(db,url,null));
@@ -427,7 +427,7 @@ async function api(request,env,db,url) {
   }
   if (path === '/api/staff/store-contact' && ['GET','POST'].includes(method)) {
     requireManager(user);
-    if (method==='GET') return json(await storeContact(db,env));
+    if (method==='GET') return json(await storeContact(db));
     const contact=contactValues(await request.json());
     await saveStoreContact(db,contact,audit(db,user,'store.contact.update','storefront'));
     return json(contact);

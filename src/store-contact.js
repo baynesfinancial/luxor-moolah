@@ -1,9 +1,9 @@
 import { assert } from './helpers.js';
 
-export async function storeContact(db,env) {
+export async function storeContact(db) {
   const exists=await db.one("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='store_contact'");
   const saved=exists && await db.one('SELECT whatsapp,instagram,messenger FROM store_contact WHERE id=1');
-  return saved || {whatsapp:env.STORE_WHATSAPP ?? '5926366630',instagram:'',messenger:''};
+  return saved || {whatsapp:'',instagram:'',messenger:''};
 }
 
 function accountName(value,hosts,linkPath) {

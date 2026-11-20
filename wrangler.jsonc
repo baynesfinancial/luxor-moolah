@@ -16,8 +16,7 @@
     "APP_ORIGIN": "https://store.quincybaynes.com",
     "MAIL_FROM": "Luxor Moolah <login@quincybaynes.com>",
     "STORE_CURRENCY": "GYD",
-    "STORE_TIME_ZONE": "America/Guyana",
-    "STORE_WHATSAPP": "5926366630"
+    "STORE_TIME_ZONE": "America/Guyana"
   },
   // Add the custom domain after verifying the Worker preview:
   // "routes": [{ "pattern": "store.quincybaines.com", "custom_domain": true }],
@@ -27,8 +26,7 @@
       "name": "luxor-moolah-staging",
       "vars": {
         "STORE_TIME_ZONE": "America/Guyana",
-        "STORE_CURRENCY": "GYD",
-        "STORE_WHATSAPP": ""
+        "STORE_CURRENCY": "GYD"
       },
       "d1_databases": [{
         "binding": "DB",
