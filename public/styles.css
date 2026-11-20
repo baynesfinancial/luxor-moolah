@@ -114,9 +114,12 @@ label,.field{display:grid;gap:6px;font-size:.87rem;font-weight:650;align-content
 .workspace-content .form-action .button{min-height:42px}
 @media(max-width:380px){.filter-grid{grid-template-columns:repeat(auto-fit,minmax(min(100%,125px),1fr))}}
 .customer-search{grid-template-columns:minmax(0,1fr) auto;max-width:35rem;align-items:end;margin:16px 0}
+.customer-picker-search{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:end;gap:8px}
+.customer-picker-search [data-find]{height:42px;min-height:42px}
 .photo-queue{display:grid;gap:6px;list-style:none;padding:0;margin:6px 0 0}
 .photo-queue:empty{display:none}
 .photo-queue li{display:flex;align-items:center;justify-content:space-between;gap:10px;overflow-wrap:anywhere}
 .item-edit-fields{padding-top:12px}
 .formgrid input:disabled{background:#eeebef;color:var(--muted);opacity:1}
 #stock-batches td:nth-child(5){overflow-wrap:anywhere}
+#stock-batches>summary .badge{margin-inline-start:8px;vertical-align:middle}

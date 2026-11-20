@@ -446,8 +446,7 @@ function stockBatches(item) {
         units,price(batch.cost),description].map(esc).concat(position===movements.length-1?`<strong>${onHand}</strong>`:String(onHand));
     });
   });
-  return `<section class="frame" id="stock-batches"><div class="actions"><h3>Stock batches</h3>
-    ${badge(`${item.on_hand} on hand`)}</div>
+  return `<details class="frame" id="stock-batches"><summary>Stock batches ${badge(`${item.on_hand} on hand`)}</summary>
     <p class="small">Each receipt keeps its own date and unit cost. Use an adjustment to correct units in an existing batch.</p>
     ${dataTable(['Batch','Date','Units','Unit cost','Description','Balance'],batchRows,'No stock movements yet.')}
     <details class="frame"><summary>Receive more stock</summary><form id="receive" class="formgrid">
@@ -461,7 +460,7 @@ function stockBatches(item) {
     <label>Reason<select name="reason" required>${option('','Choose a reason')}${Object.entries(adjustmentReasons).map(([key,label])=>option(key,label)).join('')}</select></label>
     ${text('note','Details (required for Other)','','maxlength="500"')}
     <div class="span">${button('Record adjustment')}</div></form></details>`:''}
-    </section>`;
+    </details>`;
 }
 async function renderStaffProduct(body,sku) {
   const item=await api('/api/staff/product/'+encodeURIComponent(sku));
@@ -509,15 +508,20 @@ async function renderStaffProduct(body,sku) {
   });
   if (manager) {
     renderProductEditor($('#product-editor'),item);
+    const refreshStock=async()=>{
+      await reload();
+      const stock=$('#stock-batches',body);
+      if (stock) stock.open=true;
+    };
     formHandler($('#receive'),async data=>{
       await api('/api/staff/receipts',{...data,sku:item.sku});
       notify('Stock received.');
-      await reload();
+      await refreshStock();
     });
     if ($('#adjust')) formHandler($('#adjust'),async data=>{
       await api('/api/staff/adjustments',data);
       notify('Stock adjusted.');
-      await reload();
+      await refreshStock();
     });
     if ($('#clearance')) formHandler($('#clearance'),async(data,_,submit)=>{
       const remove=submit?.value==='end';
@@ -616,7 +620,7 @@ function customerPicker(customer=null) {
     <input type="hidden" name="customer_id" value="${esc(customer?.id)}">
     <div class="controls"><span class="small" data-selected aria-live="polite">${esc(customer?.name||'Walk-in')}</span>
       <button type="button" class="button secondary" data-clear>Use walk-in</button></div>
-    <div class="controls"><label>Find a customer<input type="search" data-search placeholder="Name, phone, or email" autocomplete="off"></label>
+    <div class="customer-picker-search"><label>Find a customer<input type="search" data-search placeholder="Name, phone, or email" autocomplete="off"></label>
       <button type="button" class="button secondary" data-find>Search</button></div>
     <div data-matches aria-live="polite"></div>
     <details><summary>Add a new customer</summary><div class="formgrid">
