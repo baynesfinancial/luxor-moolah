@@ -238,22 +238,49 @@ async function renderInventoryPage(body,params) {
   const view=inventoryViews.some(([key])=>key===params.get('view'))?params.get('view'):'all';
   body.innerHTML=workspaceHeading('Inventory',
     `<a class="button secondary" href="${esc(staffLink('Inventory',{view:'upload'}))}">Upload CSV</a>
-    <button class="button secondary" id="receive-stock">Receive stock</button><button class="button" id="new-product">Add item</button>`)+
+    <button type="button" class="button secondary" id="receive-stock" aria-controls="inventory-action" aria-expanded="false">Receive stock</button>
+    <button type="button" class="button" id="new-product" aria-controls="inventory-action" aria-expanded="false">Add item</button>`)+
     subnav('Inventory',inventoryViews,view)+'<div id="inventory-action"></div><div id="inventory-page"></div>';
   const actions=$('#inventory-action',body);
-  $('#new-product',body).addEventListener('click',()=>renderProductEditor(actions,null));
-  $('#receive-stock',body).addEventListener('click',()=>{
-    actions.innerHTML=`<section class="frame"><h2>Receive stock</h2><form class="formgrid">
+  const add=$('#new-product',body);
+  const receive=$('#receive-stock',body);
+  let openTrigger=null;
+  function closeAction(restoreFocus=true) {
+    const trigger=openTrigger;
+    trigger?.setAttribute('aria-expanded','false');
+    actions.replaceChildren();
+    openTrigger=null;
+    if (restoreFocus) trigger?.focus();
+  }
+  function toggleAction(trigger,render) {
+    if (openTrigger===trigger) return closeAction();
+    closeAction(false);
+    openTrigger=trigger;
+    trigger.setAttribute('aria-expanded','true');
+    render();
+    $('[data-close-inventory]',actions).addEventListener('click',()=>closeAction());
+    $('input',actions).focus();
+  }
+  actions.addEventListener('keydown',event=>{
+    if (event.key==='Escape' && !event.defaultPrevented) closeAction();
+  });
+  add.addEventListener('click',()=>toggleAction(add,()=>renderProductEditor(actions,null)));
+  receive.addEventListener('click',()=>toggleAction(receive,()=>{
+    actions.innerHTML=`<section class="frame"><div class="actions"><h2>Receive stock</h2>
+      <button type="button" class="button secondary" data-close-inventory>Close</button></div><form class="formgrid">
       ${field('sku','SKU','','text','required')}${field('quantity','Units','','number','min="1" required')}
       ${field('unit_cost','Unit cost','','number','min="0" step="0.01"')}
       ${field('received_on','Date received or made',meta.today,'date')}${text('note','Receipt note')}
       <div class="span">${button('Receive stock')}</div></form></section>`;
-    formHandler($('form',actions),async data=>{
+    formHandler($('form',actions),async(data,form)=>{
       await api('/api/staff/receipts',data);
-      notify('Stock received.'); await renderInventoryPage(body,params);
+      notify('Stock received.');
+      if (actions.contains(form)) {
+        await renderInventoryPage(body,params);
+        $('#receive-stock',body).focus();
+      }
     });
-    $('input',actions).focus();
-  });
+  }));
   const content=$('#inventory-page',body);
   if (view==='upload') return renderImport(content);
   if (view==='categories') return renderCategories(content);
@@ -289,7 +316,9 @@ function normalizeItem(data,form) {
   return data;
 }
 function renderProductEditor(target,item) {
-  target.innerHTML=`<div class="frame"><h3>${item?'Edit item':'Add item'}</h3><form id="product-form" class="formgrid">
+  target.innerHTML=`<div class="frame"><div class="actions"><h3>${item?'Edit item':'Add item'}</h3>
+    ${item?'':'<button type="button" class="button secondary" data-close-inventory>Close</button>'}</div>
+    <form id="product-form" class="formgrid">
     ${itemFields(item?{...item,price:amount(item.price),sale_price:amount(item.sale_price),categories:list(item.categories)}:{},!!item)}
     <label>Listing status<select name="state">${['draft','active','archived'].map(state=>option(state,state,item?.state)).join('')}</select></label>
     ${photoField()}${item?.photos?.length?`<fieldset class="span"><legend>Current photos</legend><div class="photo-row">${item.photos.map((photo,index)=>
@@ -634,7 +663,9 @@ async function renderTeam(body) {
   $$('[data-revoke]',body).forEach(el=>el.addEventListener('click',()=>change(el.dataset.revoke,true)));
 }
 async function renderImport(body) {
-  body.innerHTML=`<div class="frame"><div class="actions"><h3>Upload a product batch</h3><a class="button secondary" href="/luxor-import-template.csv" download>Download CSV template</a></div>
+  body.innerHTML=`<div class="frame"><div class="actions"><h3>Upload a product batch</h3><div class="controls">
+    <a class="button secondary" href="/luxor-import-template.csv" download>Download CSV template</a>
+    <a class="button secondary" href="${esc(staffLink('Inventory'))}">Close upload</a></div></div>
     <form class="formgrid" id="upload-csv">
       <label>CSV file<input type="file" name="csv" accept=".csv,text/csv" required></label>${photoField()}<div class="span">${button('Preview rows')}</div>
     </form><div id="upload-preview" aria-live="polite"></div></div>
