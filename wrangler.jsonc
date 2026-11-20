@@ -1,0 +1,36 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "luxor-moolah",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-11-19",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": true, "html_handling": "none" },
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "luxor-moolah",
+    "database_id": "00000000-0000-0000-0000-000000000000",
+    "migrations_dir": "migrations"
+  }],
+  "r2_buckets": [{ "binding": "PHOTOS", "bucket_name": "luxor-moolah-photos" }],
+  "vars": { "STORE_TIME_ZONE": "America/Guyana", "STORE_CURRENCY": "GYD", "STORE_WHATSAPP": "5926366630" },
+  // Add the custom domain after verifying the Worker preview:
+  // "routes": [{ "pattern": "store.quincybaines.com", "custom_domain": true }],
+  "observability": { "enabled": true },
+  "env": {
+    "staging": {
+      "name": "luxor-moolah-staging",
+      "vars": {
+        "STORE_TIME_ZONE": "America/Guyana",
+        "STORE_CURRENCY": "GYD",
+        "STORE_WHATSAPP": ""
+      },
+      "d1_databases": [{
+        "binding": "DB",
+        "database_name": "luxor-moolah-staging",
+        "database_id": "00000000-0000-0000-0000-000000000001",
+        "migrations_dir": "migrations"
+      }],
+      "r2_buckets": [{ "binding": "PHOTOS", "bucket_name": "luxor-moolah-staging-photos" }]
+    }
+  }
+}

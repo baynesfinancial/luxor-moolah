@@ -1,0 +1,440 @@
+import { HttpError, assert, clean, skuOf, units, money, date, dayInZone, offsetDay, emailOf, hashToken, goodImage } from './helpers.js';
+import { buildAuth, seedAdmin, staffSession } from './auth.js';
+import { dashboard } from './dashboard.js';
+
+const id = () => crypto.randomUUID();
+const json = (value, status = 200, headers = {}) => Response.json(value, {
+  status, headers: { 'Cache-Control':'no-store', ...headers }
+});
+const migrationsHint = 'Database unavailable. Apply the D1 migrations before running the app.';
+const publicStock = "p.state='active' AND p.price IS NOT NULL AND s.on_hand>0";
+const displayPrice = 'CASE WHEN p.discount=1 AND p.sale_price IS NOT NULL THEN p.sale_price ELSE p.price END';
+const catalogSelect = `SELECT p.sku,p.name,p.description,${displayPrice} AS display_price,
+ p.type_id,t.name AS product_type,s.on_hand-s.reserved AS available,
+ (SELECT id FROM photos WHERE sku=p.sku ORDER BY position,id LIMIT 1) AS cover,
+ (SELECT group_concat(category_id) FROM product_categories WHERE sku=p.sku) AS categories
+ FROM products p JOIN stock s ON s.sku=p.sku LEFT JOIN categories t ON t.id=p.type_id`;
+function access(env) {
+  const sql = (query, ...params) => env.DB.prepare(query).bind(...params);
+  const all = async (query, ...params) => (await sql(query,...params).all()).results;
+  const one = (query, ...params) => sql(query,...params).first();
+  const run = (query, ...params) => sql(query,...params).run();
+  return {sql, all, one, run, batch: statements => env.DB.batch(statements)};
+}
+const audit = (db, user, action, target, details = null) => db.sql(
+  'INSERT INTO audit(actor,action,target,details) VALUES(?,?,?,?)',user.id,action,target,details);
+function requireManager(user) { assert(user?.role === 'manager','Manager access required.',403); }
+function transactionDay(input, today, fallback = today) {
+  const day = date(input ?? fallback);
+  assert(day <= today,'The date cannot be in the future.');
+  return day;
+}
+function addStock(db, user, sku, quantity, cost, receivedOn, today, note) {
+  if (!quantity) return [];
+  const batch = id();
+  return [
+    db.sql('INSERT INTO batches(id,sku,cost,received_on) VALUES(?,?,?,?)',batch,sku,cost,receivedOn),
+    db.sql("INSERT INTO movements(id,batch_id,kind,qty,effective_on,actor,note) VALUES(?,?,'receive',?,?,?,?)",
+      id(),batch,quantity,receivedOn ?? today,user.id,note)
+  ];
+}
+async function productPayload(db, input) {
+  const audience = [...new Set((input.categories ?? []).map(Number))];
+  assert(audience.length <= 30,'Too many audience categories.');
+  const categoryList = await db.all('SELECT id,kind FROM categories');
+  assert(audience.every(category => categoryList.some(row => row.id === category && row.kind === 'audience')), 'Unknown audience category.');
+  const type = input.type_id ? Number(input.type_id) : null;
+  assert(!type || categoryList.some(row => row.id === type && row.kind === 'type'),'Unknown product type.');
+  const name = clean(input.name);
+  const price = money(input.price);
+  const salePrice = money(input.sale_price);
+  assert(salePrice == null || (price != null && salePrice <= price),'Sale price must be at or below the regular price.');
+  const description = clean(input.description,4000);
+  return {name,description,audience,type,price,salePrice,discount:input.discount && salePrice != null ? 1 : 0};
+}
+function saveProduct(db, sku, item, state, existing) {
+  assert(item.name,'Enter a product name.');
+  assert(state !== 'active' || item.price != null,'Enter a valid selling price before publishing.');
+  const write = existing
+    ? db.sql(`UPDATE products SET name=?,description=?,type_id=?,price=?,sale_price=?,discount=?,
+      published_at=CASE WHEN state<>'active' AND ?='active' THEN CURRENT_TIMESTAMP ELSE published_at END,state=? WHERE sku=?`,
+      item.name,item.description,item.type,item.price,item.salePrice,item.discount,state,state,sku)
+    : db.sql(`INSERT INTO products(sku,name,description,type_id,price,sale_price,discount,state,published_at)
+      VALUES(?,?,?,?,?,?,?,?,CASE WHEN ?='active' THEN CURRENT_TIMESTAMP ELSE NULL END)`,
+      sku,item.name,item.description,item.type,item.price,item.salePrice,item.discount,state,state);
+  return [write, db.sql('DELETE FROM product_categories WHERE sku=?',sku),
+    ...item.audience.map(category => db.sql('INSERT INTO product_categories VALUES(?,?)',sku,category))];
+}
+async function photoStatements(db,user,photos,sku,issue = null) {
+  assert(Array.isArray(photos) && photos.length <= 16,'Select up to 16 photos.');
+  const statements = [];
+  const existing = sku ? Number((await db.one('SELECT COALESCE(MAX(position),-1) n FROM photos WHERE sku=?',sku)).n)+1 : 0;
+  for (const [index, image] of [...new Set(photos)].entries()) {
+    const row = await db.one('SELECT * FROM photos WHERE id=? AND uploader=? AND sku IS NULL AND issue_id IS NULL',image,user.id);
+    assert(row,'A selected photo is unavailable. Upload it again.');
+    statements.push(db.sql('UPDATE photos SET sku=?,issue_id=?,position=? WHERE id=? AND sku IS NULL AND issue_id IS NULL',
+      sku,issue,index+existing,image));
+  }
+  return statements;
+}
+async function uploadPhoto(request, env, db, user) {
+  const size = Number(request.headers.get('Content-Length') ?? 0);
+  assert(size <= 8500000,'Photo is too large.',413);
+  const form = await request.formData();
+  const file = form.get('photo');
+  assert(file instanceof File && file.size > 0 && file.size <= 8000000,'Choose a photo smaller than 8 MB.');
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  assert(goodImage(file.type,bytes),'Upload a JPG, PNG, WebP or AVIF image.');
+  const image = id();
+  await env.PHOTOS.put(image,bytes,{httpMetadata:{contentType:file.type}});
+  try { await db.run('INSERT INTO photos(id,uploader,mime) VALUES(?,?,?)',image,user.id,file.type); }
+  catch (error) { await env.PHOTOS.delete(image); throw error; }
+  return json({id:image},201);
+}
+async function getPhoto(env, db, user, image) {
+  const photo = await db.one(`SELECT f.*,p.state,s.on_hand FROM photos f
+    LEFT JOIN products p ON p.sku=f.sku LEFT JOIN stock s ON s.sku=p.sku WHERE f.id=?`,image);
+  const isPublic = photo?.state === 'active' && photo.on_hand > 0;
+  const allowed = user && (photo?.uploader === user.id || user.role === 'manager' || (photo?.sku && photo.state === 'active'));
+  assert(photo && (isPublic || allowed),'Photo unavailable.',404);
+  const object = await env.PHOTOS.get(image);
+  assert(object,'Photo unavailable.',404);
+  return new Response(object.body,{headers:{'Content-Type':photo.mime,'X-Content-Type-Options':'nosniff','Cache-Control':'private, no-store'}});
+}
+async function itemDetail(db, sku, user) {
+  const visibility = user ? '' : ` AND ${publicStock}`;
+  const item = await db.one(`${catalogSelect} WHERE p.sku=?${visibility}`,sku);
+  assert(item,'Item unavailable.',404);
+  item.photos = await db.all('SELECT id FROM photos WHERE sku=? ORDER BY position,id',sku);
+  if (user?.role === 'manager') {
+    Object.assign(item,await db.one('SELECT price,sale_price,discount,state FROM products WHERE sku=?',sku));
+    item.batches = await db.all('SELECT * FROM batch_balances WHERE sku=? ORDER BY received_on,id',sku);
+  }
+  if (user?.role === 'employee') {
+    const state = await db.one('SELECT state FROM products WHERE sku=?',sku);
+    assert(state.state === 'active','Item unavailable.',404);
+    await db.run('INSERT INTO recent(user_id,sku) VALUES(?,?) ON CONFLICT(user_id,sku) DO UPDATE SET seen_at=CURRENT_TIMESTAMP',user.id,sku);
+  }
+  return item;
+}
+
+async function catalog(db,url,staff) {
+  const where = [staff?.role === 'manager' ? '1=1' : staff ? "p.state='active'" : publicStock];
+  const params = [];
+  const query = clean(url.searchParams.get('q'));
+  if (query) {
+    where.push('(instr(lower(p.sku),lower(?))>0 OR instr(lower(p.name),lower(?))>0 OR instr(lower(p.description),lower(?))>0)');
+    params.push(query,query,query);
+  }
+  for (const [param, expression] of [
+    ['type','p.type_id=?'], ['audience','EXISTS(SELECT 1 FROM product_categories pc WHERE pc.sku=p.sku AND pc.category_id=?)']
+  ]) {
+    if (url.searchParams.get(param)) { where.push(expression); params.push(Number(url.searchParams.get(param)) || -1); }
+  }
+  const page = Math.min(100000, Math.max(1, Number.parseInt(url.searchParams.get('page') || '1',10) || 1));
+  const rows = await db.all(`${catalogSelect} WHERE ${where.join(' AND ')}
+     ORDER BY p.name,p.sku LIMIT 49 OFFSET ?`,...params,(page-1)*48);
+  return {items:rows.slice(0,48),next:rows.length>48,page};
+}
+async function salesList(db,user) {
+  const manager = user.role === 'manager';
+  const fields = manager ? ',s.unit_price,u.email AS employee,(SELECT COALESCE(SUM(r.quantity),0) FROM returns r WHERE r.sale_id=s.id) AS returned' : '';
+  const sales = await db.all(`SELECT s.id,s.sku,s.quantity,s.sold_on,s.status,s.submitted_at,p.name${fields}
+    FROM sales s JOIN products p ON p.sku=s.sku JOIN users u ON u.id=s.submitted_by
+    ${manager ? '' : 'WHERE s.submitted_by=?'}
+    ORDER BY s.status='pending' DESC,s.submitted_at DESC LIMIT 100`,...(manager ? [] : [user.id]));
+  const notes = await db.all(`SELECT n.sale_id,n.note,n.created_at FROM sale_notes n JOIN sales s ON n.sale_id=s.id
+    ${manager ? '' : 'WHERE s.submitted_by=?'} ORDER BY n.created_at DESC LIMIT 500`,...(manager ? [] : [user.id]));
+  for (const sale of sales) sale.notes = notes.filter(note => note.sale_id === sale.id);
+  return sales;
+}
+async function resolveImport(db,user,rowId,input,today) {
+  const row = await db.one('SELECT * FROM import_rows WHERE id=?',rowId);
+  assert(row,'Draft not found.',404);
+  if (row.approved_at) return json({alreadyApplied:true});
+  const draft = JSON.parse(row.payload);
+  const merged = {...draft,...input};
+  const item = await productPayload(db,merged);
+  const sku = draft.sku ? skuOf(draft.sku) : merged.sku ? skuOf(merged.sku) : 'LM-'+id().slice(0,8).toUpperCase();
+  const exists = await db.one('SELECT state FROM products WHERE sku=?',sku);
+  const action = input.action;
+  assert(exists ? ['update','receive'].includes(action) : action === 'create',
+    exists ? 'That SKU exists. Choose update listing or receive stock.' : 'Choose create for this new SKU.');
+  const state = input.publish ? 'active' : exists?.state ?? 'draft';
+  const quantity = action === 'update' ? 0 : units(merged.quantity,true);
+  const cost = action === 'update' ? null : money(merged.unit_cost);
+  const receivedOn = action === 'update' ? null : date(merged.received_on,true);
+  if (receivedOn) transactionDay(receivedOn,today);
+  assert(action !== 'receive' || quantity > 0,'Enter the quantity to receive.');
+  assert(action !== 'create' || !input.publish || quantity > 0,'Enter opening stock before publishing.');
+  const writes = [db.sql('INSERT INTO applied_imports VALUES(?)',rowId)];
+  if (action !== 'receive') writes.push(...saveProduct(db,sku,item,state,exists));
+  if (action !== 'update') writes.push(...addStock(db,user,sku,quantity,cost,receivedOn,today,'CSV import'));
+  if (action !== 'receive') writes.push(...await photoStatements(db,{id:row.importer},draft.photos ?? [],sku));
+  writes.push(db.sql('UPDATE import_rows SET approved_at=CURRENT_TIMESTAMP WHERE id=?',rowId),
+    audit(db,user,'import.approve',sku,action));
+  await db.batch(writes);
+  return json({sku});
+}
+async function api(request,env,db,url) {
+  const {pathname:path} = url;
+  const method = request.method;
+  const today = dayInZone(env.STORE_TIME_ZONE ?? 'America/Guyana');
+  if (!['GET','HEAD'].includes(method)) assert(request.headers.get('Origin') === url.origin,'Invalid request origin.',403);
+  const authEnabled = Boolean(env.BETTER_AUTH_SECRET);
+  const auth = authEnabled && (path.startsWith('/api/auth/') || path.startsWith('/api/staff/'))
+    ? buildAuth(env,db,url.origin) : null;
+  if (path === '/api/auth/sign-in/magic-link' && method === 'POST') {
+    assert(auth,'Staff sign-in is not configured.',503);
+    await seedAdmin(env,db);
+    return auth.handler(request);
+  }
+  if ((path === '/api/auth/magic-link/verify' && method === 'GET') ||
+      (path === '/api/auth/sign-out' && method === 'POST')) {
+    assert(auth,'Staff sign-in is not configured.',503);
+    return auth.handler(request);
+  }
+  if (path === '/api/meta' && method === 'GET') {
+    return json({categories:await db.all('SELECT * FROM categories ORDER BY id'),
+      currency:env.STORE_CURRENCY ?? 'GYD',whatsapp:env.STORE_WHATSAPP ?? '5926366630',today});
+  }
+  if (path === '/api/catalog' && method === 'GET') return json(await catalog(db,url,null));
+  const product = path.match(/^\/api\/product\/([^/]+)$/);
+  if (product && method === 'GET') return json(await itemDetail(db,skuOf(decodeURIComponent(product[1])),null));
+  if (path === '/api/events' && method === 'POST') {
+    const input = await request.json();
+    const sku = skuOf(input.sku);
+    assert(['view','whatsapp'].includes(input.kind),'Invalid event.');
+    const allowed = await db.one(`SELECT p.sku FROM products p JOIN stock s ON s.sku=p.sku WHERE p.sku=? AND ${publicStock}`,sku);
+    if (allowed) await db.run('INSERT INTO events(sku,day,kind) VALUES(?,?,?) ON CONFLICT DO UPDATE SET total=total+1',sku,today,input.kind);
+    return json({});
+  }
+  const photo = path.match(/^\/api\/photo\/([a-f0-9-]+)$/);
+  if (photo && method === 'GET') {
+    const photoAuth = authEnabled && request.headers.get('Cookie') ? buildAuth(env,db,url.origin) : null;
+    const user = photoAuth ? await staffSession(request,photoAuth,db) : null;
+    return getPhoto(env,db,user,photo[1]);
+  }
+  if (!path.startsWith('/api/staff/')) throw new HttpError(404,'Page not found.');
+  assert(auth,'Staff sign-in is not configured.',503);
+  const user = await staffSession(request,auth,db);
+  assert(user,'Sign in to open the staff workspace.',401);
+  if (path === '/api/staff/me' && method === 'GET') return json({...user,staff_whatsapp:env.STAFF_WHATSAPP || ''});
+  if (path === '/api/staff/catalog' && method === 'GET') return json(await catalog(db,url,user));
+  if (path === '/api/staff/recent' && method === 'GET') return json(await db.all(
+    'SELECT p.sku,p.name FROM recent r JOIN products p ON p.sku=r.sku WHERE r.user_id=? AND p.state=\'active\' ORDER BY r.seen_at DESC LIMIT 8',user.id));
+  const staffItem = path.match(/^\/api\/staff\/product\/([^/]+)$/);
+  if (staffItem && method === 'GET') return json(await itemDetail(db,skuOf(decodeURIComponent(staffItem[1])),user));
+  if (path === '/api/staff/photos' && method === 'POST') return uploadPhoto(request,env,db,user);
+  if (path === '/api/staff/sales' && method === 'GET') return json(await salesList(db,user));
+  if (path === '/api/staff/sales' && method === 'POST') {
+    const input = await request.json();
+    const sku = skuOf(input.sku);
+    const quantity = units(input.quantity);
+    const soldOn = transactionDay(input.sold_on,today);
+    assert(quantity > 0,'Enter at least one unit.');
+    assert(await db.one("SELECT 1 FROM products WHERE sku=? AND state='active'",sku),'That product is unavailable.',404);
+    const sale = id();
+    const statements = [db.sql('INSERT INTO sales(id,sku,quantity,sold_on,submitted_by) VALUES(?,?,?,?,?)',sale,sku,quantity,soldOn,user.id)];
+    if (input.direct) {
+      requireManager(user);
+      statements.push(db.sql("UPDATE sales SET status='approved',unit_price=?,reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?",
+        money(input.unit_price),user.id,sale));
+    }
+    statements.push(audit(db,user,input.direct ? 'sale.direct' : 'sale.submit',sale));
+    await db.batch(statements);
+    return json({id:sale},201);
+  }
+  const saleNote = path.match(/^\/api\/staff\/sales\/([a-f0-9-]+)\/notes$/);
+  if (saleNote && method === 'POST') {
+    const note = clean((await request.json()).note,2000);
+    assert(note,'Enter a note.');
+    const result = await db.run(`INSERT INTO sale_notes(id,sale_id,actor,note)
+      SELECT ?,s.id,?,? FROM sales s WHERE s.id=? AND s.status='pending' AND (s.submitted_by=? OR ?='manager')`,
+      id(),user.id,note,saleNote[1],user.id,user.role);
+    assert(result.meta.changes,'This pending sale is unavailable.',404);
+    return json({});
+  }
+  if (path === '/api/staff/issues' && method === 'POST') {
+    const input = await request.json();
+    const sku = skuOf(input.sku);
+    const note = clean(input.note,2000);
+    assert(note,'Describe the issue.');
+    assert(await db.one("SELECT 1 FROM products WHERE sku=? AND state='active'",sku),'That product is unavailable.',404);
+    const issue = id();
+    await db.batch([db.sql('INSERT INTO issues(id,sku,note,submitted_by) VALUES(?,?,?,?)',issue,sku,note,user.id),
+      ...await photoStatements(db,user,input.photos ?? [],null,issue),audit(db,user,'issue.submit',issue)]);
+    return json({id:issue},201);
+  }
+
+  requireManager(user);
+  if (path === '/api/staff/dashboard' && method === 'GET') return json(await dashboard(db,url,today));
+  if (path === '/api/staff/issues' && method === 'GET') {
+    return json(await db.all(`SELECT i.*,p.name,(SELECT group_concat(id) FROM photos WHERE issue_id=i.id) photos
+      FROM issues i JOIN products p ON p.sku=i.sku ORDER BY i.resolved_at IS NOT NULL,i.created_at DESC LIMIT 100`));
+  }
+  if (path === '/api/staff/team' && method === 'GET') {
+    return json(await db.all('SELECT email,role,active FROM users ORDER BY role DESC,email'));
+  }
+  if (path === '/api/staff/imports' && method === 'GET') {
+    const imports = await db.all(`SELECT i.id,i.payload,i.created_at,i.approved_at,p.sku AS existing_sku FROM import_rows i LEFT JOIN products p ON p.sku=json_extract(i.payload,'$.sku') WHERE i.approved_at IS NULL ORDER BY i.created_at DESC LIMIT 500`);
+    return json(imports.map(row=>({...row,payload:JSON.parse(row.payload)})));
+  }
+  if (method !== 'POST') throw new HttpError(404,'Page not found.');
+  const input = await request.json();
+  if (path === '/api/staff/team') {
+    const email = emailOf(input.email);
+    assert(email !== user.email,'Your own access is managed by the account setup.');
+    const existing = await db.one('SELECT role FROM users WHERE email=?',email);
+    assert(existing?.role !== 'manager','The administrator account cannot be changed here.');
+    await db.batch([db.sql(`INSERT INTO users(id,email,role,active) VALUES(?,?,'employee',?)
+      ON CONFLICT(email) DO UPDATE SET active=excluded.active`,id(),email,input.disable ? 0 : 1),
+      audit(db,user,input.disable?'team.revoke':'team.invite',email)]);
+    if (input.disable) {
+      await db.run('DELETE FROM "session" WHERE userId IN (SELECT id FROM "user" WHERE email=?)',email);
+      return json({});
+    }
+    try {
+      await auth.api.signInMagicLink({headers:request.headers,body:{email,callbackURL:'/staff'}});
+      return json({sent:true});
+    } catch (error) {
+      console.error('Invitation delivery failed',error.message);
+      return json({sent:false,error:'Access was enabled, but the email could not be sent. Resend the invitation after checking email setup.'},502);
+    }
+  }
+  if (path === '/api/staff/categories') {
+    const name = clean(input.name,80);
+    assert(name && ['audience','type'].includes(input.kind),'Enter a name and category level.');
+    if (input.id) await db.run('UPDATE categories SET name=? WHERE id=? AND kind=?',name,Number(input.id),input.kind);
+    else await db.run('INSERT INTO categories(kind,name) VALUES(?,?)',input.kind,name);
+    return json({});
+  }
+  if (path === '/api/staff/product') {
+    const existingSku = input.existing_sku ? skuOf(input.existing_sku) : null;
+    const sku = existingSku ?? (input.sku ? skuOf(input.sku) : 'LM-'+id().slice(0,8).toUpperCase());
+    const existing = await db.one('SELECT 1 FROM products WHERE sku=?',sku);
+    assert(existingSku ? existing : !existing, existingSku ? 'Product unavailable.' : 'This SKU already exists.',409);
+    const item = await productPayload(db,input);
+    const state = input.state ?? 'draft';
+    assert(['draft','active','archived'].includes(state),'Select a listing status.');
+    const statements = [...saveProduct(db,sku,item,state,existing),...await photoStatements(db,user,input.photos ?? [],sku)];
+    if (Array.isArray(input.photo_order)) {
+      for (const [position,image] of input.photo_order.slice(0,100).entries()) {
+        statements.push(db.sql('UPDATE photos SET position=? WHERE sku=? AND id=?',position,sku,image));
+      }
+    }
+    if (Array.isArray(input.remove_photos)) {
+      for (const image of input.remove_photos.slice(0,100)) statements.push(db.sql('DELETE FROM photos WHERE id=? AND sku=?',image,sku));
+    }
+    statements.push(audit(db,user,existing ? 'product.update' : 'product.create',sku,state));
+    await db.batch(statements);
+    return json({sku});
+  }
+  if (path === '/api/staff/receipts') {
+    const sku = skuOf(input.sku);
+    const count = units(input.quantity);
+    assert(count > 0,'Enter at least one unit.');
+    const received = date(input.received_on,true);
+    if (received) transactionDay(received,today);
+    await db.batch([...addStock(db,user,sku,count,money(input.unit_cost),received,today,clean(input.note,500)),
+      audit(db,user,'stock.receive',sku,String(count))]);
+    return json({});
+  }
+  if (path === '/api/staff/adjustments') {
+    const batch = await db.one('SELECT * FROM batch_balances WHERE id=?',input.batch ?? '');
+    assert(batch,'Batch unavailable.',404);
+    const count = units(input.quantity);
+    const reason = clean(input.note,500);
+    assert(count && reason,'Enter a quantity and reason.');
+    await db.batch([db.sql("INSERT INTO movements(id,batch_id,kind,qty,effective_on,actor,note) VALUES(?,?,'adjust',?,?,?,?)",
+      id(),batch.id,input.direction==='add' ? count : -count,today,user.id,reason),
+      audit(db,user,'stock.adjust',batch.sku,reason)]);
+    return json({});
+  }
+  const review = path.match(/^\/api\/staff\/sales\/([a-f0-9-]+)\/review$/);
+  if (review) {
+    const sale = await db.one('SELECT * FROM sales WHERE id=? AND status=\'pending\'',review[1]);
+    assert(sale,'This sale is no longer pending.',409);
+    assert(['approved','canceled','pending'].includes(input.status),'Select a review action.');
+    const sku = input.status === 'canceled' ? sale.sku : skuOf(input.sku || sale.sku);
+    const quantity = input.status === 'canceled' ? sale.quantity : units(input.quantity ?? sale.quantity);
+    assert(quantity > 0,'Enter at least one unit.');
+    const soldOn = transactionDay(input.sold_on,today,sale.sold_on);
+    const price = money(input.unit_price);
+    const result = await db.run(`UPDATE sales SET sku=?,quantity=?,sold_on=?,status=?,unit_price=?,reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP
+       WHERE id=? AND status='pending'`,sku,quantity,soldOn,input.status,price,user.id,sale.id);
+    assert(result.meta.changes,'This sale is no longer pending.',409);
+    await db.batch([audit(db,user,'sale.'+input.status,sale.id,clean(input.note,2000)),
+      ...(input.note ? [db.sql('INSERT INTO sale_notes(id,sale_id,actor,note) VALUES(?,?,?,?)',
+      id(),sale.id,user.id,clean(input.note,2000))] : [])]);
+    return json({});
+  }
+  const returned = path.match(/^\/api\/staff\/sales\/([a-f0-9-]+)\/return$/);
+  if (returned) {
+    const sale = await db.one("SELECT * FROM sales WHERE id=? AND status='approved'",returned[1]);
+    assert(sale,'Approved sale unavailable.',404);
+    const reason = clean(input.note,2000);
+    assert(reason,'Enter a return reason.');
+    const when = transactionDay(input.returned_on,today);
+    assert(when >= sale.sold_on,'Return date cannot precede the sale.');
+    const quantity = units(input.quantity ?? sale.quantity);
+    assert(quantity>0,'Enter at least one unit.');
+    const refund = money(input.refund) ?? quantity*sale.unit_price;
+    await db.batch([db.sql('INSERT INTO returns VALUES(?,?,?,?,?,?,?,?)',
+      id(),sale.id,when,input.restock ? 1 : 0,reason,user.id,quantity,refund),audit(db,user,'sale.return',sale.id,reason)]);
+    return json({});
+  }
+  const issue = path.match(/^\/api\/staff\/issues\/([a-f0-9-]+)\/resolve$/);
+  if (issue) {
+    const report = await db.one('SELECT * FROM issues WHERE id=? AND resolved_at IS NULL',issue[1]);
+    assert(report,'This issue is no longer open.',409);
+    const reason = clean(input.note,2000);
+    assert(reason,'Enter a resolution.');
+    await db.batch([db.sql('UPDATE issues SET resolution=?,resolved_by=?,resolved_at=CURRENT_TIMESTAMP WHERE id=? AND resolved_at IS NULL',
+      reason,user.id,report.id),audit(db,user,'issue.resolve',report.id,reason)]);
+    return json({});
+  }
+  if (path === '/api/staff/imports') {
+    const key = clean(input.key,100);
+    assert(/^[a-f0-9]{64}$/.test(key),'Invalid import row.');
+    const draft = input.payload;
+    const sku = draft.sku ? skuOf(draft.sku) : '';
+    await productPayload(db,draft);
+    units(draft.quantity,true);
+    if (draft.received_on) transactionDay(draft.received_on,today);
+    await photoStatements(db,user,draft.photos ?? [],null);
+    const rowId = await hashToken(user.id+':'+key);
+    await db.run('INSERT OR IGNORE INTO import_rows(id,importer,payload) VALUES(?,?,?)',rowId,user.id,JSON.stringify({...draft,sku}));
+    return json({id:rowId});
+  }
+  const importRow = path.match(/^\/api\/staff\/imports\/([a-f0-9]+)\/approve$/);
+  if (importRow) return resolveImport(db,user,importRow[1],input,today);
+  throw new HttpError(404,'Page not found.');
+}
+
+export default {
+  async fetch(request,env) {
+    const url = new URL(request.url);
+    try {
+      if (url.pathname.startsWith('/api/')) return await api(request,env,access(env),url);
+      if (url.pathname === '/' || url.pathname === '/staff' || /^\/products\/[^/]+$/.test(url.pathname)) {
+        const response = await env.ASSETS.fetch(new Request(new URL('/index.html',url.origin),request));
+        const headers = new Headers(response.headers);
+        headers.set('Content-Security-Policy',"default-src 'self'; img-src 'self' blob:; style-src 'self'; script-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'");
+        headers.set('Referrer-Policy','strict-origin-when-cross-origin');
+        return new Response(response.body,{status:response.status,headers});
+      }
+      return env.ASSETS.fetch(request);
+    } catch (error) {
+      if (error instanceof HttpError) return json({error:error.message},error.status);
+      if (error instanceof SyntaxError) return json({error:'Invalid request data.'},400);
+      const message = String(error.message);
+      for (const readable of ['Insufficient available stock','Insufficient batch stock','Reserved stock cannot be removed','Enter the actual selling price','Return exceeds the remaining sold quantity']) {
+        if (message.includes(readable)) return json({error:readable+'.'},409);
+      }
+      if (message.includes('UNIQUE constraint failed')) return json({error:'This record already exists. Refresh and try again.'},409);
+      console.error(message);
+      return json({error:message.includes('no such table') ? migrationsHint : 'The request could not be completed.'},500);
+    }
+  }
+};

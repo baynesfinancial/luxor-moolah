@@ -1,0 +1,19 @@
+{
+  "name": "luxor-moolah",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "db:local": "wrangler d1 migrations apply DB --local",
+    "db:remote": "wrangler d1 migrations apply DB --remote",
+    "deploy": "wrangler deploy",
+    "check": "node --check src/worker.js && node --check public/app.js && node --test tests/*.test.js"
+  },
+  "devDependencies": {
+    "wrangler": "4.165.0"
+  },
+  "dependencies": {
+    "better-auth": "^1.7.26"
+  }
+}

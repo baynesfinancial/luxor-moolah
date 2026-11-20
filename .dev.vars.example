@@ -1,0 +1,4 @@
+BOOTSTRAP_EMAIL=manager@example.com
+BETTER_AUTH_SECRET=replace-with-a-random-string-at-least-32-characters
+DEV_EMAIL_LOG=true
+STAFF_WHATSAPP=

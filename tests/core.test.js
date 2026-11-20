@@ -1,0 +1,59 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
+import { draftRows, parseCSV } from '../public/csv.js';
+import { date, dayInZone, money, skuOf } from '../src/helpers.js';
+
+function database() {
+  const db=new DatabaseSync(':memory:');
+  for (const file of ['0001_inventory.sql','0002_better_auth.sql']) {
+    db.exec(readFileSync(new URL('../migrations/'+file,import.meta.url),'utf8'));
+  }
+  db.exec(`INSERT INTO users VALUES('manager','admin@example.com','manager',1),('employee','staff@example.com','employee',1);
+    INSERT INTO products(sku,name,price,state) VALUES('LM15','Brown bear mug',150000,'active');
+    INSERT INTO batches(id,sku,received_on,cost) VALUES('old','LM15','2026-01-01',90000),('new','LM15','2026-01-30',100000);
+    INSERT INTO movements(id,batch_id,kind,qty,effective_on) VALUES
+      ('old-in','old','receive',1,'2026-01-01'),('new-in','new','receive',2,'2026-01-30');`);
+  return db;
+}
+test('stock reservation, duplicate approval, lot cost and dated return',()=>{
+  const db=database();
+  const insert=db.prepare("INSERT INTO sales(id,sku,quantity,sold_on,submitted_by) VALUES(?,'LM15',?,'2026-01-31','employee')");
+  insert.run('s1',2);
+  assert.deepEqual({...db.prepare('SELECT * FROM stock').get()},{sku:'LM15',on_hand:3,reserved:2});
+  assert.throws(()=>insert.run('s2',2),/Insufficient available/);
+  insert.run('s2',1);
+  assert.throws(()=>insert.run('s3',1),/Insufficient available/);
+  db.exec("UPDATE sales SET status='canceled' WHERE id='s2'");
+  assert.throws(()=>db.exec("UPDATE sales SET status='approved' WHERE id='s1'"),/actual selling price/);
+  db.exec("UPDATE sales SET status='approved',unit_price=150000,reviewed_by='manager' WHERE id='s1'");
+  db.exec("UPDATE sales SET status='approved' WHERE id='s1'");
+  assert.deepEqual({...db.prepare('SELECT * FROM stock').get()},{sku:'LM15',on_hand:1,reserved:0});
+  const movements=db.prepare("SELECT batch_id,qty,effective_on FROM movements WHERE kind='sale' ORDER BY batch_id").all().map(row=>({...row}));
+  assert.deepEqual(movements,[{batch_id:'new',qty:-1,effective_on:'2026-01-31'},{batch_id:'old',qty:-1,effective_on:'2026-01-31'}]);
+  db.exec("INSERT INTO returns VALUES('r1','s1','2026-02-03',1,'Returned','manager',1,150000)");
+  assert.equal(db.prepare('SELECT on_hand FROM stock').get().on_hand,2);
+  assert.throws(()=>db.exec("INSERT INTO returns VALUES('r2','s1','2026-02-03',1,'Duplicate','manager',2,300000)"),/remaining sold quantity/);
+  db.exec("INSERT INTO returns VALUES('r3','s1','2026-02-03',1,'Returned','manager',1,150000)");
+  assert.equal(db.prepare('SELECT on_hand FROM stock').get().on_hand,3);
+});
+test('CSV supports quoted descriptions and duplicate or missing photos are flagged',()=>{
+  const rows=parseCSV('\uFEFFsku,name,description,categories,subcategory,quantity,unit_cost,price,image_files\r\n'+
+    'lm15,Brown mug,"Brown, with ""ears""",Men,Mugs,2,900,1500,a.jpg|b.jpg\r\n'+
+    'LM15,Bear mug,test,Men,Mugs,1,900,1500,a.jpg');
+  const result=draftRows(rows,[{name:'a.jpg'}],[{id:1,kind:'audience',name:'Men'},{id:5,kind:'type',name:'Mugs'}]);
+  assert.equal(result[0].payload.description,'Brown, with "ears"');
+  assert.equal(result[0].payload.type_id,5);
+  assert.match(result[0].errors.join(' '),/Missing photo b.jpg/);
+  assert.match(result[0].errors.join(' '),/Duplicate SKU/);
+  assert.match(result[1].errors.join(' '),/Duplicate SKU/);
+  assert.throws(()=>parseCSV('name\n"unterminated'),/unclosed quote/);
+});
+test('stock and pricing validators preserve input meaning',()=>{
+  assert.equal(money('1500.20'),150020);
+  assert.throws(()=>money('1,500.20'));
+  assert.throws(()=>date('2026-02-30'));
+  assert.equal(skuOf(' lm15 '),'LM15');
+  assert.equal(dayInZone('America/Guyana',new Date('2026-11-20T01:00:00Z')),'2026-11-19');
+});
