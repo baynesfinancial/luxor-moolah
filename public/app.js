@@ -187,6 +187,8 @@ function signIn() {
 }
 const staffLink = (tab,values={}) => '/staff?'+new URLSearchParams({tab,...values});
 const managerSections = [['Overview','▦'],['Orders','▤'],['Customers','◇'],['Inventory','▧'],['Reports','▥'],['Team','○']];
+const homepageLabels={featured:'Featured',arrivals:'Just In',clearance:'Last Chance'};
+let attentionRevision=0;
 
 async function openStaff() {
   try { staff=await api('/api/staff/me'); }
@@ -219,17 +221,27 @@ async function openStaff() {
         <div class="controls"><a href="/">View storefront</a><button class="button secondary" id="signout">Sign out</button></div>
       </div>
     </aside>
-    <div class="workspace-content" id="staffbody"></div></div>`;
+    <div class="workspace-content">${manager?'<div id="homepage-alerts" role="status" hidden></div>':''}<div id="staffbody"></div></div></div>`;
   $('#workspace-menu').addEventListener('click',event=>{
     const open=$('#workspace-sidebar').classList.toggle('open');
     event.currentTarget.setAttribute('aria-expanded',String(open));
   });
   $('#signout').addEventListener('click',async()=>{try { await api('/api/auth/sign-out',{}); location.assign('/staff'); } catch(error){notify(error.message);} });
-  if (manager && activeTab!=='Overview') refreshPendingCount();
+  if (manager) refreshWorkspaceAttention();
   await loadTab(activeTab,sku,params);
 }
-async function refreshPendingCount() {
-  try { setPendingCount((await api('/api/staff/attention')).pending); } catch { /* The badge is supplementary. */ }
+async function refreshWorkspaceAttention() {
+  const target=$('#homepage-alerts');
+  if (!target) return;
+  const revision=++attentionRevision;
+  try {
+    const {pending,homepage=[]}=await api('/api/staff/attention');
+    if (!target.isConnected || revision!==attentionRevision) return;
+    setPendingCount(pending);
+    target.hidden=!homepage.length;
+    target.innerHTML=homepage.map(entry=>`<p><strong>${esc(entry.name)} sold out.</strong>
+      <a href="${esc(staffLink('Inventory',{view:'homepage'}))}#homepage-pick-${entry.section}-${entry.slot}">Refill ${esc(homepageLabels[entry.section])} picks</a></p>`).join('');
+  } catch { /* The notifications are supplementary. */ }
 }
 function setPendingCount(count) {
   const target=$('#workspace-pending');
@@ -271,7 +283,7 @@ async function renderStaffInventory(body) {
     ${recent.length?`<div class="controls"><span class="small">Recently opened</span>${recent.map(item=>`<a class="button secondary" href="/staff?sku=${esc(item.sku)}">${esc(item.name)}</a>`).join('')}</div>`:''}${catalogFilters()}`;
   wireCatalog(true);
 }
-const inventoryViews=[['all','All inventory'],['low','Low-stock sellers'],['aging','Stock over 90 days'],['upload','CSV upload'],['categories','Categories']];
+const inventoryViews=[['all','All inventory'],['low','Low-stock sellers'],['aging','Stock over 90 days'],['upload','CSV upload'],['categories','Categories'],['homepage','Homepage picks']];
 async function renderInventoryPage(body,params) {
   const view=inventoryViews.some(([key])=>key===params.get('view'))?params.get('view'):'all';
   body.innerHTML=workspaceHeading('Inventory',
@@ -298,6 +310,11 @@ async function renderInventoryPage(body,params) {
   const content=$('#inventory-page',body);
   if (view==='upload') return renderImport(content);
   if (view==='categories') return renderCategories(content);
+  if (view==='homepage') {
+    await renderHomepagePicks(content);
+    if (location.hash.startsWith('#homepage-pick-')) document.getElementById(location.hash.slice(1))?.scrollIntoView?.();
+    return;
+  }
   if (view==='all') return renderStaffInventory(content);
   const days=overviewDays(params.get('days'));
   const productType=Number(params.get('type'))||null;
@@ -330,6 +347,46 @@ async function renderInventoryPage(body,params) {
   if (filter) formHandler(filter,async values=>{
     location.assign(staffLink('Inventory',{view,days:values.days??days,type:values.type,filtered:1}));
   });
+}
+async function renderHomepagePicks(target) {
+  const {display,assignments,overrides,pinned,choices}=await api('/api/staff/homepage-picks');
+  const sections=[
+    {key:'featured',title:'Featured',slots:5,hint:'The first three available picks appear. The remaining picks are backups.'},
+    {key:'arrivals',title:'Just In',slots:4,hint:'The first two eligible pins appear. Open spots use the newest available listings published in the past 14 days.'},
+    {key:'clearance',title:'Last Chance',slots:3,hint:'The first eligible pin appears. The automatic pick is the available item that has been on clearance the longest.'}
+  ];
+  target.innerHTML=`<h2>Homepage picks</h2>${sections.map(({key,title,slots,hint})=>{
+    const featured=key==='featured';
+    const selected=featured?assignments:overrides.filter(row=>row.section===key);
+    const eligible=featured?selected.filter(row=>choices[key].some(item=>item.sku===row.sku)):pinned.filter(row=>row.section===key);
+    const showing=display[key].map(item=>esc(item.name)).join(' · ')||'No eligible picks';
+    return `<section class="frame homepage-pick-section"><h3>${title}</h3><p class="small">${hint}</p>
+      <p class="small">${eligible.length} of ${slots} picks available</p>
+      <p><strong>Currently showing</strong> ${showing}</p>
+      ${Array.from({length:slots},(_,index)=>{
+        const slot=index+1;
+        const current=selected.find(row=>row.slot===slot);
+        const available=choices[key];
+        const absent=current&&!available.some(row=>row.sku===current.sku);
+        const label=`${title} position ${slot}`;
+        const fallback=featured?'No pick':'Automatic';
+        const inactive=current&&!eligible.some(row=>row.slot===slot);
+        const backup=current&&!inactive&&!display[key].some(row=>row.sku===current.sku);
+        return `<form id="homepage-pick-${key}-${slot}" class="filter-grid homepage-pick-form" data-homepage-pick="${key}" data-slot="${slot}">
+          <label>${label}<select name="sku">${option('',fallback,current?.sku??'')}
+          ${absent?option(current.sku,`${current.name} (currently unavailable)`,current.sku):''}
+          ${available.map(item=>option(item.sku,`${item.name} · ${item.sku}`,current?.sku)).join('')}</select></label>
+          <div class="form-action">${button('Save pick','secondary')}</div>
+          ${inactive?`<small class="span">${featured?'This pick is hidden while unavailable.':'This pin is inactive. An eligible backup or an automatic pick can take its place.'}</small>`:
+            backup?'<small class="span">Available backup</small>':''}</form>`;
+      }).join('')}</section>`;
+  }).join('')}`;
+  $$('[data-homepage-pick]',target).forEach(form=>formHandler(form,async data=>{
+    await api('/api/staff/homepage-picks',{...data,section:form.dataset.homepagePick,slot:form.dataset.slot});
+    await renderHomepagePicks(target);
+    refreshWorkspaceAttention();
+    notify('Homepage pick saved.');
+  }));
 }
 function audienceInputs(selected=[]) {
   return `<fieldset class="span"><legend>Audience categories</legend><div class="controls">${meta.categories.filter(c=>c.kind==='audience')
@@ -452,7 +509,7 @@ function renderProductEditor(target,item) {
   });
 }
 function featuredOptions(selected,active=true) {
-  return option(0,'Not featured',selected)+(active?[1,2,3].map(slot=>option(slot,`Spot ${slot}`,selected)).join(''):'');
+  return option(0,'Not featured',selected)+(active?[1,2,3,4,5].map(slot=>option(slot,`Spot ${slot}`,selected)).join(''):'');
 }
 const adjustmentReasons={damaged:'Damaged item',missing:'Missing item',miscount:'Stock count correction',other:'Other'};
 function stockBatches(item) {
@@ -521,7 +578,8 @@ async function renderStaffProduct(body,sku) {
         <form id="feature-product" class="formgrid"><label>Featured position<select name="slot">
         ${featuredOptions(item.featured_slot??0,item.state==='active')}
         </select></label><div>${button('Save featured position')}</div>
-        <small class="span">Choosing an occupied spot replaces its current product. Only available items appear on the homepage.</small></form></details>`:''}
+        <small class="span">Choosing an occupied spot replaces its current product. Only available items appear on the homepage.
+        <a href="${esc(staffLink('Inventory',{view:'homepage'}))}">Manage homepage picks</a></small></form></details>`:''}
       ${stockBatches(item)}
       <div class="frame"><button type="button" class="button danger" data-delete-record>Delete product</button></div>`:''}`;
   wireGallery(item);
@@ -535,6 +593,7 @@ async function renderStaffProduct(body,sku) {
     if (data.price_changed && !data.note?.trim()) throw new Error('Explain the price adjustment for the manager.');
     await api('/api/staff/sales',{...data,sku:item.sku});
     notify(manager?'Sale approved.':'Sale submitted.');
+    if (manager) refreshWorkspaceAttention();
     await reload();
   });
   if ($('#issue')) formHandler($('#issue'),async(data,form)=>{
@@ -548,6 +607,7 @@ async function renderStaffProduct(body,sku) {
     if (featureForm) formHandler(featureForm,async data=>{
       await api('/api/staff/product/'+encodeURIComponent(item.sku)+'/featured',data);
       notify('Featured position saved.');
+      refreshWorkspaceAttention();
       await reload();
     });
     const refreshStock=async()=>{
@@ -630,7 +690,7 @@ function wireDeleteRecord(path,kind,returnTo) {
           dialog.close();
           history.replaceState(null,'',staffLink(returnTo));
           await loadTab(returnTo);
-          refreshPendingCount();
+          refreshWorkspaceAttention();
           notify(result.cleanupPending?'Product deleted. Photo file cleanup will retry on the next product deletion.':`${record.name} deleted.`);
         } catch (failure) {
           error.textContent=failure.message;
@@ -679,7 +739,7 @@ async function renderSales(body,view) {
     wireCustomerPicker(form);
     formHandler(form,async(data,_,submit)=>{
       await api(`/api/staff/sales/${form.dataset.review}/review`,{...data,status:submit.value});
-      notify('Sale updated.'); refreshPendingCount(); await renderSales(body,view);
+      notify('Sale updated.'); refreshWorkspaceAttention(); await renderSales(body,view);
     });
   });
   $$('[data-assign]',body).forEach(form=>{

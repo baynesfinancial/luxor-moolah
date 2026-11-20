@@ -177,21 +177,86 @@ async function catalog(db,url,staff) {
   return {items:rows.slice(0,48),next:rows.length>48,page};
 }
 
-async function shopHome(db) {
-  const available=`${publicStock} AND s.on_hand>s.reserved`;
-  const newest='COALESCE(p.published_at,p.created_at) DESC,p.sku';
-  const [featured,arrivals,clearance]=await db.batch([
-    db.sql(`${catalogSelect} JOIN featured_products f ON f.sku=p.sku WHERE ${available} ORDER BY f.slot`),
-    db.sql(`${catalogSelect} WHERE ${available} ORDER BY ${newest} LIMIT 4`),
-    db.sql(`${catalogSelect} WHERE ${available} AND p.discount=1 AND p.sale_price<p.price ORDER BY ${newest} LIMIT 3`)
+const homepageRules={
+  arrivals:{size:2,limit:4,where:"p.published_at>=datetime('now','-14 days')",order:'p.published_at DESC,p.sku'},
+  clearance:{size:1,limit:3,where:'p.discount=1 AND p.sale_price<p.price',order:'p.clearance_started_at,p.sku'}
+};
+const homepageAvailable=`${publicStock} AND s.on_hand>s.reserved`;
+async function shopHome(db,manager=false) {
+  const sections=Object.keys(homepageRules);
+  const [featured,pins,...candidates]=await db.batch([
+    db.sql(`${catalogSelect} JOIN featured_products f ON f.sku=p.sku WHERE ${homepageAvailable} ORDER BY f.slot LIMIT 3`),
+    db.sql(`${catalogSelect.replace('SELECT ','SELECT h.section,h.slot,')} JOIN homepage_pins h ON h.sku=p.sku
+      WHERE ${homepageAvailable} AND ((h.section='arrivals' AND ${homepageRules.arrivals.where})
+        OR (h.section='clearance' AND ${homepageRules.clearance.where})) ORDER BY h.section,h.slot`),
+    ...sections.map(section=>{
+      const rule=homepageRules[section];
+      return db.sql(`${catalogSelect} WHERE ${homepageAvailable} AND ${rule.where} ORDER BY ${rule.order} LIMIT 8`);
+    })
   ]);
-  return {featured:featured.results,arrivals:arrivals.results,clearance:clearance.results};
+  const used=new Set(featured.results.map(item=>item.sku));
+  const display={featured:featured.results,arrivals:[],clearance:[]};
+  const validPins=pins.results.filter(pin=>!used.has(pin.sku));
+  for (const {section,slot,...item} of validPins) {
+    if (display[section].length>=homepageRules[section].size) continue;
+    display[section].push(item);
+    used.add(item.sku);
+  }
+  // A clearance item can qualify for both sections. Keep a dedicated clearance pick.
+  for (const section of ['clearance','arrivals']) {
+    for (const candidate of candidates[sections.indexOf(section)].results) {
+      if (display[section].length>=homepageRules[section].size) break;
+      if (used.has(candidate.sku)) continue;
+      display[section].push(candidate);
+      used.add(candidate.sku);
+    }
+  }
+  if (!manager) return display;
+  const [assignments,overrides,featuredChoices,...eligible]=await db.batch([
+    db.sql('SELECT f.slot,p.sku,p.name FROM featured_products f JOIN products p USING(sku) ORDER BY f.slot'),
+    db.sql('SELECT h.section,h.slot,p.sku,p.name FROM homepage_pins h JOIN products p USING(sku) ORDER BY h.section,h.slot'),
+    db.sql(`SELECT p.sku,p.name FROM products p JOIN stock s USING(sku) WHERE ${homepageAvailable} ORDER BY p.name,p.sku`),
+    ...sections.map(section=>db.sql(`SELECT p.sku,p.name FROM products p JOIN stock s USING(sku)
+      WHERE ${homepageAvailable} AND ${homepageRules[section].where}
+        AND NOT EXISTS (SELECT 1 FROM featured_products f WHERE f.sku=p.sku) ORDER BY p.name,p.sku`))
+  ]);
+  return {display,assignments:assignments.results,overrides:overrides.results,
+    pinned:validPins.map(({section,slot,sku})=>({section,slot,sku})),
+    choices:{featured:featuredChoices.results,arrivals:eligible[0].results,clearance:eligible[1].results}};
 }
 function featureStatements(db,sku,slot) {
-  const statements=[db.sql('DELETE FROM featured_products WHERE sku=? OR slot=?',sku,slot)];
-  if (slot) statements.push(db.sql(`INSERT INTO featured_products(slot,sku) VALUES(?,(
-    SELECT sku FROM products WHERE sku=? AND state='active' AND price IS NOT NULL))`,slot,sku));
+  const statements=[db.sql('DELETE FROM featured_products WHERE sku=? OR slot=?',sku,slot),
+    db.sql("DELETE FROM homepage_sold_out WHERE section='featured' AND (slot=? OR sku=?)",slot,sku)];
+  if (slot && sku) statements.push(
+    db.sql('DELETE FROM homepage_pins WHERE sku=?',sku),
+    db.sql(`INSERT INTO featured_products(slot,sku) VALUES(?,(
+      SELECT sku FROM products WHERE sku=? AND state='active' AND price IS NOT NULL))`,slot,sku));
   return statements;
+}
+async function saveHomepagePick(db,user,input) {
+  const {section}=input;
+  assert(['featured','arrivals','clearance'].includes(section),'Choose a homepage section.');
+  const limit=section==='featured'?5:homepageRules[section].limit;
+  const slot=Number(input.slot);
+  assert(Number.isInteger(slot) && slot>=1 && slot<=limit,'Choose a valid homepage position.');
+  const sku=input.sku?skuOf(input.sku):null;
+  const writes=section==='featured'?featureStatements(db,sku,slot):[
+    db.sql('DELETE FROM homepage_pins WHERE (section=? AND slot=?) OR sku=?',section,slot,sku),
+    db.sql('DELETE FROM homepage_sold_out WHERE section=? AND (slot=? OR sku=?)',section,slot,sku)
+  ];
+  if (sku && section!=='featured') writes.push(db.sql(`INSERT INTO homepage_pins(section,slot,sku) VALUES(?,?,(
+    SELECT p.sku FROM products p JOIN stock s USING(sku) WHERE p.sku=? AND ${homepageAvailable}
+      AND ${homepageRules[section].where} AND NOT EXISTS(SELECT 1 FROM featured_products f WHERE f.sku=p.sku)))`,
+    section,slot,sku));
+  writes.push(audit(db,user,sku?'product.homepage.pick':'homepage.pick',sku??section,`${section}:${slot}`));
+  try { await db.batch(writes); }
+  catch (error) {
+    if (/NOT NULL constraint failed: (featured_products|homepage_pins)\.sku/.test(String(error.message))) {
+      throw new HttpError(409,'This item is no longer eligible for that section. Refresh and choose another.');
+    }
+    throw error;
+  }
+  return json({});
 }
 async function salesList(db,user,view) {
   const manager = user.role === 'manager';
@@ -386,6 +451,7 @@ async function api(request,env,db,url) {
   }
 
   requireManager(user);
+  if (path === '/api/staff/homepage-picks' && method === 'GET') return json(await shopHome(db,true));
   const deletion=path.match(/^\/api\/staff\/(product|customers)\/([A-Za-z0-9_-]+)\/delete$/);
   if (deletion) {
     const kind=deletion[1]==='product'?'product':'customer';
@@ -400,7 +466,12 @@ async function api(request,env,db,url) {
   if (path === '/api/staff/orders' && method === 'GET') return json(await listOrders(db,url));
   if (path === '/api/staff/returns' && method === 'GET') return json(await listReturns(db,url));
   if (path === '/api/staff/attention' && method === 'GET') {
-    return json(await db.one("SELECT COUNT(*) AS pending FROM sales WHERE status='pending'"));
+    const [pending,homepage]=await db.batch([
+      db.sql("SELECT COUNT(*) AS pending FROM sales WHERE status='pending'"),
+      db.sql(`SELECT a.section,a.slot,p.name FROM homepage_sold_out a JOIN products p ON p.sku=a.sku
+        ORDER BY a.section,a.slot`)
+    ]);
+    return json({...pending.results[0],homepage:homepage.results});
   }
   if (orderRoute && method === 'GET') return json(await orderDetail(db,orderRoute[1]));
   if (path === '/api/staff/dashboard' && method === 'GET') return json(await dashboard(db,url,today));
@@ -432,6 +503,7 @@ async function api(request,env,db,url) {
   }
   if (method !== 'POST') throw new HttpError(404,'Page not found.');
   const input = await request.json();
+  if (path === '/api/staff/homepage-picks') return saveHomepagePick(db,user,input);
   if (path === '/api/staff/customers') return json(await createCustomer(db,input),201);
   if (path === '/api/staff/orders') {
     const customer = await customerId(db,input.customer_id);
@@ -473,7 +545,7 @@ async function api(request,env,db,url) {
   if (featured) {
     const sku=skuOf(featured[1]);
     const slot=Number(input.slot);
-    assert([0,1,2,3].includes(slot),'Choose a featured position.');
+    assert([0,1,2,3,4,5].includes(slot),'Choose a featured position.');
     const item=await db.one('SELECT state,price FROM products WHERE sku=?',sku);
     assert(item,'Product unavailable.',404);
     if (slot) assert(item.state==='active' && item.price!=null,'Publish the item before featuring it.',409);
@@ -497,8 +569,10 @@ async function api(request,env,db,url) {
     assert(input.remove===true || (reduced!=null && product.price!=null && reduced<product.price),
       'Enter a clearance price below the selling price.');
     const [result]=await db.batch([
-      db.sql(`UPDATE products SET sale_price=?,discount=? WHERE sku=? AND (? IS NULL OR (state='active' AND price>?))`,
-        reduced,reduced===null?0:1,sku,reduced,reduced),
+      db.sql(`UPDATE products SET sale_price=?,discount=?,clearance_started_at=CASE
+        WHEN ? IS NULL THEN NULL WHEN discount=1 AND sale_price<price THEN COALESCE(clearance_started_at,CURRENT_TIMESTAMP)
+        ELSE CURRENT_TIMESTAMP END WHERE sku=? AND (? IS NULL OR (state='active' AND price>?))`,
+        reduced,reduced===null?0:1,reduced,sku,reduced,reduced),
       audit(db,user,reduced===null?'product.clearance.end':'product.clearance.set',sku)
     ]);
     assert(result.meta.changes,'The listing status or selling price changed. Refresh and try again.',409);
@@ -516,7 +590,7 @@ async function api(request,env,db,url) {
     const state = input.state ?? 'draft';
     assert(['draft','active','archived'].includes(state),'Select a listing status.');
     const featuredSlot=Number(input.featured_slot??0);
-    assert([0,1,2,3].includes(featuredSlot),'Choose a featured position.');
+    assert([0,1,2,3,4,5].includes(featuredSlot),'Choose a featured position.');
     assert(!featuredSlot || (!existing && state==='active'),'Choose a featured position on a new active listing.',409);
     const openingQuantity=units(input.quantity,true)??0;
     const unitCost=money(input.unit_cost);
