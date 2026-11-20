@@ -383,7 +383,8 @@ async function api(request,env,db,url) {
     return auth.handler(request);
   }
   if ((path === '/api/auth/magic-link/verify' && method === 'GET') ||
-      (path === '/api/auth/sign-out' && method === 'POST')) {
+      (method==='POST' && ['/api/auth/sign-out','/api/auth/sign-in/email',
+        '/api/auth/request-password-reset','/api/auth/reset-password'].includes(path))) {
     assert(auth,'Staff sign-in is not configured.',503);
     return auth.handler(request);
   }
@@ -419,7 +420,13 @@ async function api(request,env,db,url) {
   const ownerEmail = env.BOOTSTRAP_EMAIL?.trim().toLowerCase();
   const canManageAdmins = user.role==='manager' && user.email===ownerEmail;
   if (path === '/api/staff/me' && method === 'GET') {
-    return json({...user,can_manage_admins:canManageAdmins,staff_whatsapp:env.STAFF_WHATSAPP || ''});
+    const credential=await db.one(`SELECT 1 FROM "account" a JOIN "user" linked ON linked.id=a.userId
+      WHERE linked.email=? AND a.providerId='credential' AND a.password IS NOT NULL`,user.email);
+    return json({...user,has_password:Boolean(credential),can_manage_admins:canManageAdmins,staff_whatsapp:env.STAFF_WHATSAPP || ''});
+  }
+  if (path === '/api/staff/password' && method === 'POST') {
+    const {newPassword}=await request.json();
+    return auth.api.setPassword({headers:request.headers,body:{newPassword},asResponse:true});
   }
   if (path === '/api/staff/catalog' && method === 'GET') return json(await catalog(db,url,user));
   if (path === '/api/staff/recent' && method === 'GET') return json(await db.all(
@@ -567,7 +574,9 @@ async function api(request,env,db,url) {
     assert(result.meta.changes,'Team access changed. Refresh and try again.',409);
     if (disable) return json({});
     try {
-      await auth.api.signInMagicLink({headers:request.headers,body:{email,callbackURL:'/staff'}});
+      await auth.api.signInMagicLink({headers:request.headers,body:{
+        email,callbackURL:'/staff?password=setup',errorCallbackURL:'/staff'
+      }});
       return json({sent:true});
     } catch (error) {
       console.error('Invitation delivery failed',error.message);

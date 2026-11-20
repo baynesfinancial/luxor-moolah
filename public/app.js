@@ -213,14 +213,71 @@ async function renderPublicProduct(sku) {
   $('#whatsapp')?.addEventListener('click',()=>sendEvent(item.sku,'whatsapp'));
 }
 function signIn() {
+  const params=new URLSearchParams(location.search);
+  const email=field('email','Email address','','email','required autocomplete="username"');
   main.innerHTML=`<div class="shell"><section class="signin frame"><h2>Staff sign-in</h2>
-    <p>Enter the email address your manager invited. We’ll send you a one-time sign-in link.</p>
-    ${new URLSearchParams(location.search).has('error')?'<p class="alert">This link could not be used. Request a new one below.</p>':''}
-    <form id="signin-form">${field('email','Email address','','email','required autocomplete="email"')}${button('Email me a sign-in link')}</form><p id="signin-feedback" role="status"></p></section></div>`;
+    ${params.get('password')==='changed'?'<p role="status">Password saved. Sign in with your new password.</p>':''}
+    ${params.has('error')?'<p class="alert">This link could not be used. Request a new one below.</p>':''}
+    <form id="signin-form">${email}${field('password','Password','','password','required autocomplete="current-password" maxlength="128"')}
+    ${button('Sign in')}</form>
+    <details ${params.has('error')||params.get('password')==='help'?'open':''}><summary>Use an email link or reset your password</summary>
+      <form id="email-access">${email}<div class="controls">
+        ${button('Email me a sign-in link','secondary')}
+        <button class="button secondary" type="submit" value="reset">Email a password reset link</button>
+      </div></form><p id="signin-feedback" role="status"></p>
+    </details></section></div>`;
   formHandler($('#signin-form'),async data=>{
-    await api('/api/auth/sign-in/magic-link',{...data,callbackURL:'/staff',errorCallbackURL:'/staff'});
-    $('#signin-feedback').textContent='If this email has staff access, check your inbox for a sign-in link.';
+    await api('/api/auth/sign-in/email',{email:data.email.trim(),password:data.password,rememberMe:false});
+    location.replace('/staff');
   });
+  formHandler($('#email-access'),async(data,_,submit)=>{
+    const email=data.email.trim();
+    const reset=submit?.value==='reset';
+    await api(reset?'/api/auth/request-password-reset':'/api/auth/sign-in/magic-link',reset?{email}:{
+      email,callbackURL:'/staff?password=setup',errorCallbackURL:'/staff'
+    });
+    $('#signin-feedback').textContent=`If this email has staff access, check your inbox for a ${reset?'password reset':'sign-in'} link.`;
+  });
+}
+function passwordForm() {
+  const attributes='required minlength="12" maxlength="128" autocomplete="new-password"';
+  return `<form id="new-password">
+    ${field('newPassword','New password','','password',attributes)}
+    ${field('confirmPassword','Confirm password','','password',attributes)}
+    <small>Use at least 12 characters.</small>${button('Save password')}
+  </form>`;
+}
+function bindPasswordForm(path,token) {
+  formHandler($('#new-password'),async({newPassword,confirmPassword})=>{
+    if (newPassword!==confirmPassword) throw new Error('The passwords do not match.');
+    await api(path,{newPassword,token});
+    location.replace(token?'/staff?password=changed':'/staff');
+  });
+}
+function renderPasswordSettings() {
+  main.innerHTML=`<div class="shell"><section class="signin frame">
+    <h2>${staff.has_password?'Manage password':'Set your password'}</h2>
+    <p><strong>${esc(staff.email)}</strong> is your sign-in email.</p>
+    ${staff.has_password?`<form id="reset-current"><div>${button('Email a password reset link','secondary')}</div>
+      <p id="reset-feedback" role="status"></p></form>`:passwordForm()}
+    <p><a href="/staff">${staff.has_password?'Back to workspace':'Continue to workspace'}</a></p>
+  </section></div>`;
+  if (staff.has_password) formHandler($('#reset-current'),async()=>{
+    await api('/api/auth/request-password-reset',{email:staff.email});
+    $('#reset-feedback').textContent='Check your inbox for a password reset link.';
+  });
+  else bindPasswordForm('/api/staff/password');
+}
+function renderPasswordReset() {
+  const token=new URLSearchParams(location.hash.slice(1)).get('token');
+  history.replaceState(null,'','/staff?password=reset');
+  if (!token) {
+    location.replace('/staff?password=help&error=reset');
+    return;
+  }
+  main.innerHTML=`<div class="shell"><section class="signin frame"><h2>Reset your password</h2>
+    ${passwordForm()}<p><a href="/staff?password=help">Request a new reset link</a></p></section></div>`;
+  bindPasswordForm('/api/auth/reset-password',token);
 }
 const staffLink = (tab,values={}) => '/staff?'+new URLSearchParams({tab,...values});
 const managerSections = [['Overview','▦'],['Orders','▤'],['Customers','◇'],['Inventory','▧'],['Reports','▥'],['Team','○']];
@@ -234,14 +291,17 @@ function switchWorkspaceView(view) {
 }
 
 async function openStaff() {
+  const params=new URLSearchParams(location.search);
+  if (params.get('password')==='reset') return renderPasswordReset();
+  if (params.get('password')==='help') return signIn();
   try { staff=await api('/api/staff/me'); }
   catch (error) {
     if (error.status!==401) throw error;
     sessionStorage.removeItem(workspaceViewKey);
     return signIn();
   }
+  if (params.get('password')==='setup') return renderPasswordSettings();
   const manager=staff.role==='manager';
-  const params=new URLSearchParams(location.search);
   const sku=params.get('sku');
   const aliases={Dashboard:'Overview',Sales:'Orders','CSV upload':'Inventory',Categories:'Inventory','Damage reports':'Reports'};
   const requested=params.get('tab');
@@ -265,6 +325,7 @@ async function openStaff() {
         <span class="workspace-icon" aria-hidden="true">${icon}</span>${esc(name)}
         ${name==='Orders'?'<span id="workspace-pending" class="count-badge" hidden></span>':''}</a>`).join('')}</nav>
       <div class="workspace-account"><span class="small">${esc(staff.email)}</span>
+        <a class="small" href="/staff?password=setup">${staff.has_password?'Manage password':'Set password'}</a>
         <div class="controls"><a href="/">View storefront</a><button class="button secondary" id="signout">Sign out</button></div>
       </div>
     </aside>
@@ -1053,7 +1114,7 @@ async function renderTeam(body) {
       <button type="button" class="button secondary" id="open-workspace-view" disabled>Switch view</button>
     </div>
   </div><div class="frame"><h3>Invite a team member</h3>
-    <p class="small">Team members sign in with a one-time email link.</p><form class="formgrid" id="invite">
+    <p class="small">The invitation link lets each team member set their own password.</p><form class="formgrid" id="invite">
     ${field('email','Email address','','email','required')}
     ${canManageAdmins?'<label>Access role<select name="role"><option value="employee">Staff</option><option value="manager">Admin</option></select></label>':''}
     <div class="form-action">${button('Send invitation')}</div></form>

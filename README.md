@@ -15,6 +15,8 @@ npm run dev
 
 Open the local URL printed by Wrangler. Choose **Staff workspace**, enter the bootstrap email from `.dev.vars`, and use the one-time link printed by the local dev server. In **Team**, select **View as → Staff** and click **Switch view** to use the staff workspace with your admin sign-in. **Return to admin view** takes you back to Team. Submissions in staff preview use the current store's data and are attributed to your admin account. Local email links are printed only when enabled on a loopback hostname.
 
+Staff invitations and one-time sign-in links open password setup. After saving a password, sign in with your invited email and password. Existing users can choose **Set password** from the workspace sidebar. The staff sign-in page also offers password reset and one-time sign-in links.
+
 ```bash
 npm run check
 ```
