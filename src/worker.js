@@ -9,7 +9,8 @@ const json = (value, status = 200, headers = {}) => Response.json(value, {
   status, headers: { 'Cache-Control':'no-store', ...headers }
 });
 const migrationsHint = 'Database unavailable. Apply the D1 migrations before running the app.';
-const publicStock = "p.state='active' AND p.price IS NOT NULL AND s.on_hand>0";
+const publicStock = `p.state='active' AND p.price IS NOT NULL AND s.on_hand>0
+  AND EXISTS(SELECT 1 FROM photos WHERE sku=p.sku)`;
 const clearancePrice = 'p.discount=1 AND p.sale_price<p.price';
 const displayPrice = 'CASE WHEN p.discount=1 AND p.sale_price IS NOT NULL THEN p.sale_price ELSE p.price END';
 const catalogSelect = `SELECT p.sku,p.name,p.description,${displayPrice} AS display_price,
@@ -180,7 +181,8 @@ async function catalog(db,url,staff) {
     if (url.searchParams.get(param)) { where.push(expression); params.push(Number(url.searchParams.get(param)) || -1); }
   }
   const page = Math.min(100000, Math.max(1, Number.parseInt(url.searchParams.get('page') || '1',10) || 1));
-  const rows = await db.all(`${catalogSelect} WHERE ${where.join(' AND ')}
+  const select = staff?.role === 'manager' ? catalogSelect.replace('SELECT p.sku','SELECT p.state,p.sku') : catalogSelect;
+  const rows = await db.all(`${select} WHERE ${where.join(' AND ')}
      ORDER BY p.name,p.sku LIMIT 49 OFFSET ?`,...params,(page-1)*48);
   return {items:rows.slice(0,48),next:rows.length>48,page};
 }
@@ -559,8 +561,40 @@ async function api(request,env,db,url) {
   if (path === '/api/staff/categories') {
     const name = clean(input.name,80);
     assert(name && ['audience','type'].includes(input.kind),'Enter a name and category level.');
-    if (input.id) await db.run('UPDATE categories SET name=? WHERE id=? AND kind=?',name,Number(input.id),input.kind);
-    else await db.run('INSERT INTO categories(kind,name) VALUES(?,?)',input.kind,name);
+    const result = input.id
+      ? await db.run('UPDATE categories SET name=? WHERE id=? AND kind=?',name,Number(input.id),input.kind)
+      // Preserve IDs in open forms and imports after a category is deleted.
+      : await db.run(`INSERT INTO categories(id,kind,name) SELECT MAX(
+        (SELECT COALESCE(MAX(id),0) FROM categories),
+        (SELECT COALESCE(MAX(CAST(target AS INTEGER)),0) FROM audit WHERE action='category.delete')
+        )+1,?,?`,input.kind,name);
+    assert(result.meta.changes,'Category not found.',404);
+    return json({});
+  }
+  const categoryDeletion = path.match(/^\/api\/staff\/categories\/(\d+)\/delete$/);
+  if (categoryDeletion) {
+    const categoryId=Number(categoryDeletion[1]);
+    const category=await db.one('SELECT kind FROM categories WHERE id=?',categoryId);
+    assert(category,'Category not found.',404);
+    const detach = category.kind==='audience'
+      ? [
+        db.sql('DELETE FROM product_categories WHERE category_id=?',categoryId),
+        db.sql(`UPDATE import_rows SET payload=json_set(payload,'$.categories',json((
+          SELECT json_group_array(value) FROM json_each(payload,'$.categories') WHERE CAST(value AS INTEGER)<>?
+        ))) WHERE approved_at IS NULL AND EXISTS(
+          SELECT 1 FROM json_each(payload,'$.categories') WHERE CAST(value AS INTEGER)=?
+        )`,categoryId,categoryId)
+      ] : [
+        db.sql('UPDATE products SET type_id=NULL WHERE type_id=?',categoryId),
+        db.sql(`UPDATE import_rows SET payload=json_set(payload,'$.type_id',NULL,'$.subcategory','')
+          WHERE approved_at IS NULL AND CAST(json_extract(payload,'$.type_id') AS INTEGER)=?`,categoryId)
+      ];
+    const results=await db.batch([...detach,
+      db.sql(`INSERT INTO audit(actor,action,target,details)
+        SELECT ?,'category.delete',CAST(id AS TEXT),name FROM categories WHERE id=?`,user.id,categoryId),
+      db.sql('DELETE FROM categories WHERE id=?',categoryId)
+    ]);
+    assert(results.at(-1).meta.changes,'Category not found.',404);
     return json({});
   }
   const featured = path.match(/^\/api\/staff\/product\/([A-Za-z0-9_-]+)\/featured$/);

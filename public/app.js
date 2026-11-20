@@ -108,7 +108,21 @@ function productCard(p,isStaff,layout='') {
     <h3>${esc(p.name)}</h3>${p.display_price!=null?`<p${isStaff?'':' class="storefront-price"'}>${esc(price(p.display_price))}
       ${!isStaff&&p.original_price!=null?`<del aria-label="Original price ${esc(price(p.original_price))}">${esc(price(p.original_price))}</del>`:''}</p>`:''}${isStaff?availability:''}</div></a>`;
 }
-function wireCatalog(isStaff=false) {
+function inventoryListRow(item) {
+  const picture=item.cover
+    ? img(item.cover,'','inventory-thumbnail')+img(item.cover,'','inventory-photo-preview')
+    : blank(item.name);
+  return `<li><a class="inventory-list-row" href="/staff?sku=${encodeURIComponent(item.sku)}">
+    <span class="inventory-list-product"><span class="inventory-list-photo">${picture}</span>
+      <span><strong>${esc(item.name)}</strong><span class="small">${esc(item.sku)}${item.cover?'':' · No photo'}</span></span>
+    </span>
+    <span><span class="small">Product type</span>${esc(item.product_type||'—')}</span>
+    <span><span class="small">Available</span>${Math.max(item.available,0)}</span>
+    <span><span class="small">Selling price</span>${esc(price(item.display_price))}</span>
+    <span><span class="small">Status</span>${esc(item.state)}</span>
+  </a></li>`;
+}
+function wireCatalog(isStaff=false,listView=false) {
   const filters=$('#filters');
   const target=$('#catalog-results');
   let revision=0;
@@ -119,7 +133,9 @@ function wireCatalog(isStaff=false) {
     try {
       const result=await api(`${isStaff?'/api/staff/catalog':'/api/catalog'}?${params}`);
       if (current!==revision || !target.isConnected) return;
-      target.innerHTML=result.items.length ? `<div class="cards">${result.items.map(p=>productCard(p,isStaff)).join('')}</div>
+      target.innerHTML=result.items.length ? `${listView
+        ? `<ul class="inventory-list">${result.items.map(inventoryListRow).join('')}</ul>`
+        : `<div class="cards">${result.items.map(p=>productCard(p,isStaff)).join('')}</div>`}
       ${page>1||result.next?`<div class="actions section">${page>1?'<button id="previous" class="button secondary">Previous</button>':'<span></span>'}
       ${result.next?'<button id="more" class="button secondary">Next products</button>':''}</div>`:''}` :
         empty(isStaff?'No inventory items match this search.':params.has('clearance')?
@@ -316,13 +332,13 @@ async function loadTab(tab,sku=null,params=new URLSearchParams(location.search))
     return await renderOverview(body,params);
   } catch (error) { body.innerHTML=empty(error.message); }
 }
-async function renderStaffInventory(body) {
+async function renderStaffInventory(body,listView=false) {
   const recent=await api('/api/staff/recent');
   body.innerHTML=`${staff.role==='manager'?'<div id="product-editor"></div>':workspaceHeading('Inventory')}
     ${recent.length?`<div class="controls"><span class="small">Recently opened</span>${recent.map(item=>`<a class="button secondary" href="/staff?sku=${esc(item.sku)}">${esc(item.name)}</a>`).join('')}</div>`:''}${catalogFilters()}`;
-  wireCatalog(true);
+  wireCatalog(true,listView);
 }
-const inventoryViews=[['all','All inventory'],['low','Low-stock sellers'],['aging','Stock over 90 days'],['upload','CSV upload'],['categories','Categories'],['homepage','Homepage picks']];
+const inventoryViews=[['all','All inventory'],['list','List view'],['low','Low-stock sellers'],['aging','Stock over 90 days'],['upload','CSV upload'],['categories','Categories'],['homepage','Homepage picks']];
 async function renderInventoryPage(body,params) {
   const view=inventoryViews.some(([key])=>key===params.get('view'))?params.get('view'):'all';
   body.innerHTML=workspaceHeading('Inventory',
@@ -354,7 +370,7 @@ async function renderInventoryPage(body,params) {
     if (location.hash.startsWith('#homepage-pick-')) document.getElementById(location.hash.slice(1))?.scrollIntoView?.();
     return;
   }
-  if (view==='all') return renderStaffInventory(content);
+  if (view==='all'||view==='list') return renderStaffInventory(content,view==='list');
   const days=overviewDays(params.get('days'));
   const productType=Number(params.get('type'))||null;
   const query=overviewQuery(days);
@@ -518,7 +534,7 @@ function renderProductEditor(target,item) {
     <label>Listing status<select name="state">${['draft','active','archived'].map(state=>option(state,state,item?.state)).join('')}</select></label>
     ${item?'':`<div data-create-feature hidden><label>Featured position<select name="featured_slot" disabled>
       ${featuredOptions(0)}</select></label><small>Choosing an occupied spot replaces its current product.</small></div>`}
-    ${photoField()}<div class="span"><small>Choose photos in one or more selections. You can add more in Edit item after saving.</small>
+    ${photoField()}<div class="span"><small>Photos are optional. Active items appear on the storefront once they have a photo.</small>
       <ul class="photo-queue" data-photo-queue aria-live="polite"></ul></div>${item?.photos?.length?`<fieldset class="span"><legend>Current photos</legend><div class="photo-row" data-photo-order>${item.photos.map((photo,index)=>
     `<div data-position="${index+1}">${img(photo.id,'Photo '+(index+1),'issue-img')}<label>Order<select data-order="${esc(photo.id)}">${item.photos.map((_,position)=>option(position+1,position+1,index+1)).join('')}</select></label><label><input name="remove" type="checkbox" value="${esc(photo.id)}">Remove</label></div>`).join('')}</div></fieldset>`:''}
     <div class="span">${button('Save item')}</div></form></div>`;
@@ -1005,9 +1021,23 @@ function renderCategories(body) {
    ${[{id:'',name:''},...meta.categories.filter(row=>row.kind===kind)].map(row=>`
     <form class="formgrid" data-cat="${kind}" data-id="${row.id}">
       ${field('name',row.id?'Category name':'New category',row.name,'text','required')}
-      <div class="form-action">${button(row.id?'Save name':'Add category','secondary')}</div></form>`).join('')}</div>`).join('');
+      <div class="form-action controls">${button(row.id?'Save name':'Add category','secondary')}
+      ${row.id?`<button type="button" class="button danger" data-delete-category aria-label="Delete ${esc(row.name)}">Delete</button>`:''}</div></form>`).join('')}</div>`).join('');
   $$('[data-cat]',body).forEach(form=>formHandler(form,async data=>{
     await api('/api/staff/categories',{...data,kind:form.dataset.cat,id:form.dataset.id});await updateMeta();notify('Category saved.');renderCategories(body);
+  }));
+  $$('[data-delete-category]',body).forEach(button=>button.addEventListener('click',async()=>{
+    const form=button.form;
+    const category=meta.categories.find(row=>String(row.id)===form.dataset.id);
+    if (!category || !confirm(`Delete “${category.name}”? This removes it from assigned items and pending CSV drafts. The items and their sales history will be kept.`)) return;
+    button.disabled=true;
+    try {
+      await api(`/api/staff/categories/${category.id}/delete`,{});
+      await updateMeta();
+      notify('Category deleted.');
+      renderCategories(body);
+    } catch(error) { notify(error.message); }
+    finally { button.disabled=false; }
   }));
 }
 async function renderTeam(body) {
@@ -1048,7 +1078,9 @@ async function renderImport(body) {
     <a class="button secondary" href="/luxor-import-template.csv" download>Download CSV template</a>
     <a class="button secondary" href="${esc(staffLink('Inventory'))}">Close upload</a></div></div>
     <form class="formgrid" id="upload-csv">
-      <label>CSV file<input type="file" name="csv" accept=".csv,text/csv" required></label>${photoField()}<div class="span">${button('Preview rows')}</div>
+      <label>CSV file<input type="file" name="csv" accept=".csv,text/csv" required></label>${photoField()}
+      <small class="span">For items without photos, leave the CSV’s image_files field blank. You can activate those items for staff sales and add photos later to show them on the storefront.</small>
+      <div class="span">${button('Preview rows')}</div>
     </form><div id="upload-preview" aria-live="polite"></div></div>
     <h3>Drafts awaiting approval</h3><p class="small">Open a draft to finish its stock and pricing details.</p><div id="drafts"></div>`;
   formHandler($('#upload-csv'),async (_,form)=>{
@@ -1059,7 +1091,7 @@ async function renderImport(body) {
     preview.innerHTML=table(['Row','SKU','Product','Photos','Review'],rows.map(row=>{
       const missing=importMissing(row.payload);
       const status=row.errors.join(' · ')||(missing.length?'Needs '+missing.join(', '):'Ready to add');
-      return [row.number,row.payload.sku||'New SKU',row.payload.name,row.files.map(file=>file.name).join(', '),status];
+      return [row.number,row.payload.sku||'New SKU',row.payload.name,row.files.map(file=>file.name).join(', ')||'No photos',status];
     }));
     const valid=rows.filter(row=>!row.errors.length);
     const ready=valid.filter(row=>!importMissing(row.payload).length);
