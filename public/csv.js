@@ -32,6 +32,14 @@ export function parseCSV(content) {
   return rows;
 }
 const split = value => String(value).split('|').map(value=>value.trim()).filter(Boolean);
+const photoNameKey = name => name.normalize('NFC').toLowerCase().replace(/[ _-]+/g,'-')
+  .replace(/-and-/g,'-').replace(/-01-front\./,'-01-cover.');
+function matchingPhotos(files,name) {
+  const exact=files.filter(file=>file.name===name);
+  if (exact.length) return exact;
+  const key=photoNameKey(name);
+  return files.filter(file=>photoNameKey(file.name)===key);
+}
 export function draftRows(table,files,categories){
   const heading=table[0]?.map(name=>name.trim().toLowerCase())??[];
   if(!heading.includes('name'))throw new Error('Include a name column and use the downloadable CSV template.');
@@ -58,7 +66,7 @@ export function draftRows(table,files,categories){
     const type=categories.find(c=>c.kind==='type'&&c.name.toLowerCase()===fields.subcategory.toLowerCase());
     if(fields.subcategory&&!type)errors.push('Unknown product type '+fields.subcategory);
     const fileList=split(fields.image_files).map(name=>{
-      const matches=files.filter(file=>file.name===name);
+      const matches=matchingPhotos(files,name);
       if(matches.length!==1)errors.push((matches.length?'Ambiguous photo ':'Missing photo ')+name);
       return matches[0];
     }).filter(Boolean);
@@ -70,7 +78,7 @@ export function draftRows(table,files,categories){
     }
     if(fields.sale_price&&(!fields.price||Number(fields.sale_price)>Number(fields.price)))errors.push('Sale price needs a regular price and cannot exceed it');
     if(fields.received_on&&(!/^\d{4}-\d{2}-\d{2}$/.test(fields.received_on)||!Number.isFinite(Date.parse(fields.received_on))||
-      new Date(fields.received_on).toISOString().slice(0,10)!==fields.received_on))errors.push('Invalid received date');
+      new Date(fields.received_on).toISOString().slice(0,10)!==fields.received_on))errors.push('Invalid received date (use YYYY-MM-DD)');
     const entry={number:index+2,errors,files:fileList,payload:{...fields,sku,categories:audience,type_id:type?.id??null}};
     rows.push(entry);
     if(sku&&!bySku.has(sku))bySku.set(sku,entry);

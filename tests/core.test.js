@@ -61,6 +61,22 @@ test('stock and pricing validators preserve input meaning',()=>{
   assert.equal(dayInZone('America/Guyana',new Date('2026-11-20T01:00:00Z')),'2026-11-19');
 });
 
+test('CSV matches renamed sample photos and keeps ambiguous matches blocked',()=>{
+  const table=parseCSV('name,received_on,image_files\n'+
+    'Sea Glass Ceramic Mug,2026-11-05,sea-glass-ceramic-mug-01-cover.png\n'+
+    'Oatmeal Bunny Plush,11/05/26,oatmeal-bunny-plush-01-front.png\n'+
+    'Amber and Cream Market Tote,,amber-cream-market-tote-01-cover.png');
+  const files=['Sea Glass Ceramic Mug 01 Cover.png','Oatmeal Bunny Plush 01 Cover.png',
+    'Amber and Cream Market Tote 01 Cover.png'].map(name=>({name}));
+  const rows=draftRows(table,files,[]);
+  assert.deepEqual(rows.map(row=>row.files[0]),files);
+  assert.deepEqual(rows.map(row=>row.errors),[[],['Invalid received date (use YYYY-MM-DD)'],[]]);
+  const alternate={name:'sea_glass_ceramic_mug_01_cover.png'};
+  assert.match(draftRows(table,[...files,alternate],[])[0].errors[0],/Ambiguous photo/);
+  const exact={name:'sea-glass-ceramic-mug-01-cover.png'};
+  assert.equal(draftRows(table,[...files,alternate,exact],[])[0].files[0],exact);
+});
+
 test('customer search, grouped order history and returns count each line once',async()=>{
   const sqlite=database();
   const db={

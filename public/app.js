@@ -986,6 +986,10 @@ async function renderTeam(body) {
   $$('[data-invite]',body).forEach(el=>el.addEventListener('click',()=>change(el.dataset.invite)));
   $$('[data-revoke]',body).forEach(el=>el.addEventListener('click',()=>change(el.dataset.revoke,true)));
 }
+function importMissing(item) {
+  return [!item.name?'product name':'',!(Number(item.quantity)>0)?'starting quantity':'',
+    item.unit_cost==null||item.unit_cost===''?'unit cost':'',item.price==null||item.price===''?'selling price':''].filter(Boolean);
+}
 async function renderImport(body) {
   body.innerHTML=`<div class="frame"><div class="actions"><h3>Upload a product batch</h3><div class="controls">
     <a class="button secondary" href="/luxor-import-template.csv" download>Download CSV template</a>
@@ -993,39 +997,76 @@ async function renderImport(body) {
     <form class="formgrid" id="upload-csv">
       <label>CSV file<input type="file" name="csv" accept=".csv,text/csv" required></label>${photoField()}<div class="span">${button('Preview rows')}</div>
     </form><div id="upload-preview" aria-live="polite"></div></div>
-    <h3>Drafts awaiting approval</h3><div id="drafts"></div>`;
+    <h3>Drafts awaiting approval</h3><p class="small">Open a draft to finish its stock and pricing details.</p><div id="drafts"></div>`;
   formHandler($('#upload-csv'),async (_,form)=>{
     const csv=form.elements.csv.files[0];
     const files=[...form.elements.files.files];
     const rows=draftRows(parseCSV(await csv.text()),files,meta.categories);
     const preview=$('#upload-preview');
-    preview.innerHTML=table(['Row','SKU','Product','Photos','Review'],rows.map(row=>[row.number,row.payload.sku||'New SKU',row.payload.name,
-      row.files.map(file=>file.name).join(', '),row.errors.join(' · ')||'Valid']));
-    const ready=rows.filter(row=>!row.errors.length);
-    if (!ready.length) return;
-    preview.insertAdjacentHTML('beforeend',`<button class="button" id="stage">Save ${ready.length} valid rows as drafts</button>`);
-    $('#stage').addEventListener('click',async event=>{
-      const button=event.currentTarget;
-      button.disabled=true;
-      let done=0;
-      const rejected=[];
-      for (const row of ready) {
-        try {
-          button.textContent=`Saving row ${row.number}…`;
-          const key=await rowKey(row.payload,row.files);
-          const photos=await Promise.all(row.files.map(upload));
-          await api('/api/staff/imports',{key,payload:{...row.payload,photos}});
-          done++;
-        } catch (error) { rejected.push(`Row ${row.number}: ${error.message}`); }
+    preview.innerHTML=table(['Row','SKU','Product','Photos','Review'],rows.map(row=>{
+      const missing=importMissing(row.payload);
+      const status=row.errors.join(' · ')||(missing.length?'Needs '+missing.join(', '):'Ready to add');
+      return [row.number,row.payload.sku||'New SKU',row.payload.name,row.files.map(file=>file.name).join(', '),status];
+    }));
+    const valid=rows.filter(row=>!row.errors.length);
+    const ready=valid.filter(row=>!importMissing(row.payload).length);
+    if (!valid.length) {
+      preview.insertAdjacentHTML('beforeend','<p class="alert">Fix the issues above, then preview the CSV again.</p>');
+      return;
+    }
+    preview.insertAdjacentHTML('beforeend',`<div class="controls">
+      ${ready.length?`<button type="button" class="button" id="publish-import">Add and publish ${ready.length} complete ${ready.length===1?'item':'items'}</button>`:''}
+      <button type="button" class="button ${ready.length?'secondary':''}" id="stage">Save ${valid.length} valid rows as drafts</button></div>
+      ${ready.length<valid.length?'<p class="small">Save incomplete rows as drafts to enter the missing details on this page.</p>':''}
+      <div data-import-result aria-live="polite"></div>`);
+    const save=$('#stage',preview);
+    const publish=$('#publish-import',preview);
+    const feedback=$('[data-import-result]',preview);
+    const uploadsByRow=new Map();
+    async function stageRow(row) {
+      const key=await rowKey(row.payload,row.files);
+      if (!uploadsByRow.has(row)) uploadsByRow.set(row,new Map());
+      const uploaded=uploadsByRow.get(row);
+      const photos=await Promise.all(row.files.map(file=>{
+        if (!uploaded.has(file)) uploaded.set(file,upload(file).catch(error=>{uploaded.delete(file);throw error;}));
+        return uploaded.get(file);
+      }));
+      return api('/api/staff/imports',{key,payload:{...row.payload,photos}});
+    }
+    async function run(batch,publishNow) {
+      if (publishNow&&!confirm(`Add stock and publish up to ${batch.length} new items?`)) return;
+      save.disabled=true;
+      if (publish) publish.disabled=true;
+      let added=0;
+      let saved=0;
+      let skipped=0;
+      const issues=[];
+      try {
+        for (const row of batch) {
+          feedback.textContent=`Processing row ${row.number}…`;
+          try {
+            const draft=await stageRow(row);
+            if (draft.approved_at) { skipped++; continue; }
+            if (!publishNow||draft.existing_sku) { saved++; continue; }
+            const result=await api(`/api/staff/imports/${draft.id}/approve`,{action:'create',publish:true});
+            if (result.alreadyApplied) skipped++;
+            else added++;
+          } catch (error) { issues.push(`Row ${row.number}: ${error.message}`); }
+        }
+        await showDrafts();
+      } catch (error) { issues.push(error.message); }
+      finally {
+        save.disabled=false;
+        if (publish) publish.disabled=false;
       }
-      notify(`${done} rows saved for review.`);
-      button.textContent=`${done} rows saved`;
-      if (rejected.length) {
-        button.disabled=false;button.textContent='Retry batch';
-        preview.insertAdjacentHTML('beforeend',`<ul class="alert">${rejected.map(line=>`<li>${esc(line)}</li>`).join('')}</ul>`);
-      }
-      await showDrafts();
-    });
+      const result=[added&&`${added} added and published`,saved&&`${saved} saved for draft review`,
+        skipped&&`${skipped} already imported`].filter(Boolean).join(' · ');
+      feedback.innerHTML=`${result?`<p>${esc(result)}.</p>`:''}
+        ${added?`<a href="${esc(staffLink('Inventory'))}">View inventory</a>`:''}
+        ${issues.length?`<ul class="alert">${issues.map(message=>`<li>${esc(message)}</li>`).join('')}</ul>`:''}`;
+    }
+    save.addEventListener('click',()=>run(valid,false));
+    publish?.addEventListener('click',()=>run(ready,true));
   });
   await showDrafts();
 }
@@ -1036,18 +1077,21 @@ async function showDrafts() {
   const draftForm=row=>{
     const item=row.payload;
     const exists=!!row.existing_sku;
+    const missing=importMissing(item);
     return `<details class="frame"><summary>${esc(item.name||'Unnamed item')} · ${esc(item.sku||'Assign SKU')}
-       ${exists?badge('Existing SKU',true):''}</summary>
+       ${exists?badge('Existing SKU',true):missing.length?badge('Needs details',true):badge('Ready to add')}</summary>
+       ${!exists&&missing.length?`<p class="small">Still needed to publish: ${esc(missing.join(', '))}.</p>`:''}
        <div class="photo-row">${(item.photos||[]).map(photo=>img(photo,'Draft photo','issue-img')).join('')}</div>
        <form class="formgrid" data-draft="${row.id}">${itemFields(item,!!item.sku)}
        ${field('quantity','Starting quantity',item.quantity,'number','min="0"')}
        ${moneyField('unit_cost','Unit cost',item.unit_cost)}
        ${field('received_on','Date received',item.received_on,'date')}
        <label>Action<select name="action">${exists?'<option value="">Choose an action</option><option value="update">Update listing details</option>':'<option value="create">Create item</option>'}</select></label>
-       <label class="check"><input type="checkbox" name="publish">Publish listing</label><div class="span">${button('Approve this row')}</div>
+       <label class="check"><input type="checkbox" name="publish" ${exists?'':'checked'}>Publish listing</label><div class="span">${button(exists?'Apply update':'Add to inventory')}</div>
        </form></details>`;
   };
-  target.innerHTML=drafts.length?`<div class="controls"><button class="button secondary" id="approve-batch">Approve complete new items and publish</button></div>`+
+  const ready=drafts.filter(row=>!row.existing_sku&&!importMissing(row.payload).length);
+  target.innerHTML=drafts.length?(ready.length?`<div class="controls"><button class="button secondary" id="approve-batch">Add and publish ${ready.length} complete ${ready.length===1?'draft':'drafts'}</button></div>`:'')+
     drafts.map(draftForm).join(''):empty('No imported drafts awaiting approval.');
   $$('[data-draft]',target).forEach(form=>formHandler(form,async data=>{
     normalizeItem(data,form);
@@ -1055,13 +1099,13 @@ async function showDrafts() {
     if (source.payload.themes==null && !data.themes.trim()) delete data.themes;
     data.publish=!!data.publish;
     assertChoice(data.action);
+    const missing=importMissing(data);
+    if (!source.existing_sku && data.publish && missing.length) throw new Error('Enter '+missing.join(', ')+' before publishing.');
     await api(`/api/staff/imports/${form.dataset.draft}/approve`,data);
-    notify('Draft approved.');await showDrafts();
+    notify('Inventory updated.');await showDrafts();
   }));
   $('#approve-batch',target)?.addEventListener('click',async event=>{
     const button=event.currentTarget;
-    const ready=drafts.filter(row=>!row.existing_sku&&row.payload.name&&row.payload.price!==''&&row.payload.price!=null&&Number(row.payload.quantity)>0 && row.payload.unit_cost!=null && row.payload.unit_cost!=='');
-    if (!ready.length) return notify('No complete new drafts are ready for batch approval.');
     if (!confirm(`Add stock and publish ${ready.length} new items?`)) return;
     button.disabled=true;
     const pending=[];

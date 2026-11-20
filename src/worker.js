@@ -697,13 +697,17 @@ async function api(request,env,db,url) {
     assert(/^[a-f0-9]{64}$/.test(key),'Invalid import row.');
     const draft = input.payload;
     const sku = draft.sku ? skuOf(draft.sku) : '';
+    const rowId = await hashToken(user.id+':'+key);
+    const status = () => db.one(`SELECT i.id,i.approved_at,p.sku AS existing_sku FROM import_rows i
+      LEFT JOIN products p ON p.sku=json_extract(i.payload,'$.sku') WHERE i.id=?`,rowId);
+    const previous=await status();
+    if (previous) return json(previous);
     await productPayload(db,draft);
     units(draft.quantity,true);
     if (draft.received_on) transactionDay(draft.received_on,today);
     await photoStatements(db,user,draft.photos ?? [],null);
-    const rowId = await hashToken(user.id+':'+key);
     await db.run('INSERT OR IGNORE INTO import_rows(id,importer,payload) VALUES(?,?,?)',rowId,user.id,JSON.stringify({...draft,sku}));
-    return json({id:rowId});
+    return json(await status());
   }
   const importRow = path.match(/^\/api\/staff\/imports\/([a-f0-9]+)\/approve$/);
   if (importRow) return resolveImport(db,user,importRow[1],input,today);
