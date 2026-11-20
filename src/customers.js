@@ -66,3 +66,13 @@ export async function orderDetail(db,id) {
   for (const line of order.lines) line.returns = returns.filter(entry=>entry.sale_id===line.id);
   return order;
 }
+
+export async function listReturns(db,url) {
+  const pager = paging(url);
+  const rows = await db.all(`SELECT r.id,r.sale_id,r.returned_on,r.quantity,r.refund,r.restock,r.reason,
+    s.order_id,s.sku,p.name,c.name AS customer_name
+    FROM returns r JOIN sales s ON s.id=r.sale_id JOIN products p ON p.sku=s.sku
+    LEFT JOIN orders o ON o.id=s.order_id LEFT JOIN customers c ON c.id=o.customer_id
+    ORDER BY r.returned_on DESC,r.id DESC LIMIT ? OFFSET ?`,pager.size+1,pager.offset);
+  return paged(rows,pager);
+}

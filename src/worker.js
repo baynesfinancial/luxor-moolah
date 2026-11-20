@@ -1,7 +1,7 @@
 import { HttpError, assert, clean, skuOf, units, money, date, dayInZone, offsetDay, emailOf, hashToken, goodImage } from './helpers.js';
 import { buildAuth, seedAdmin, staffSession } from './auth.js';
 import { dashboard } from './dashboard.js';
-import { searchCustomers, createCustomer, customerId, customerDetail, listOrders, orderDetail } from './customers.js';
+import { searchCustomers, createCustomer, customerId, customerDetail, listOrders, orderDetail, listReturns } from './customers.js';
 
 const id = () => crypto.randomUUID();
 const json = (value, status = 200, headers = {}) => Response.json(value, {
@@ -137,15 +137,18 @@ async function catalog(db,url,staff) {
      ORDER BY p.name,p.sku LIMIT 49 OFFSET ?`,...params,(page-1)*48);
   return {items:rows.slice(0,48),next:rows.length>48,page};
 }
-async function salesList(db,user) {
+async function salesList(db,user,view) {
   const manager = user.role === 'manager';
   const fields = manager ? ',s.order_id,o.customer_id,c.name AS customer_name,s.unit_price,u.email AS employee,(SELECT COALESCE(SUM(r.quantity),0) FROM returns r WHERE r.sale_id=s.id) AS returned' : '';
+  const joins = manager ? 'LEFT JOIN orders o ON o.id=s.order_id LEFT JOIN customers c ON c.id=o.customer_id' : '';
+  const filter = !manager ? 'WHERE s.submitted_by=?' :
+    view==='pending' ? "WHERE s.status='pending'" : view==='legacy' ? "WHERE s.status='approved' AND s.order_id IS NULL" : '';
+  const params = manager ? [] : [user.id];
   const sales = await db.all(`SELECT s.id,s.sku,s.quantity,s.sold_on,s.status,s.submitted_at,p.name${fields}
     FROM sales s JOIN products p ON p.sku=s.sku JOIN users u ON u.id=s.submitted_by
-    ${manager ? 'LEFT JOIN orders o ON o.id=s.order_id LEFT JOIN customers c ON c.id=o.customer_id' : 'WHERE s.submitted_by=?'}
-    ORDER BY s.status='pending' DESC,s.submitted_at DESC LIMIT 100`,...(manager ? [] : [user.id]));
+    ${joins} ${filter} ORDER BY s.status='pending' DESC,s.submitted_at DESC,s.id LIMIT 100`,...params);
   const notes = await db.all(`SELECT n.sale_id,n.note,n.created_at FROM sale_notes n JOIN sales s ON n.sale_id=s.id
-    ${manager ? '' : 'WHERE s.submitted_by=?'} ORDER BY n.created_at DESC LIMIT 500`,...(manager ? [] : [user.id]));
+    ${filter} ORDER BY n.created_at DESC LIMIT 500`,...params);
   for (const sale of sales) sale.notes = notes.filter(note => note.sale_id === sale.id);
   return sales;
 }
@@ -272,7 +275,7 @@ async function api(request,env,db,url) {
   const staffItem = path.match(/^\/api\/staff\/product\/([^/]+)$/);
   if (staffItem && method === 'GET') return json(await itemDetail(db,skuOf(decodeURIComponent(staffItem[1])),user));
   if (path === '/api/staff/photos' && method === 'POST') return uploadPhoto(request,env,db,user);
-  if (path === '/api/staff/sales' && method === 'GET') return json(await salesList(db,user));
+  if (path === '/api/staff/sales' && method === 'GET') return json(await salesList(db,user,url.searchParams.get('view')));
   if (path === '/api/staff/sales' && method === 'POST') {
     const input = await request.json();
     const sku = skuOf(input.sku);
@@ -323,6 +326,10 @@ async function api(request,env,db,url) {
   if (path === '/api/staff/customers' && method === 'GET') return json(await searchCustomers(db,url));
   if (customerRoute && method === 'GET') return json(await customerDetail(db,customerRoute[1]));
   if (path === '/api/staff/orders' && method === 'GET') return json(await listOrders(db,url));
+  if (path === '/api/staff/returns' && method === 'GET') return json(await listReturns(db,url));
+  if (path === '/api/staff/attention' && method === 'GET') {
+    return json(await db.one("SELECT COUNT(*) AS pending FROM sales WHERE status='pending'"));
+  }
   if (orderRoute && method === 'GET') return json(await orderDetail(db,orderRoute[1]));
   if (path === '/api/staff/dashboard' && method === 'GET') return json(await dashboard(db,url,today));
   if (path === '/api/staff/issues' && method === 'GET') {

@@ -41,6 +41,7 @@ function summarize(rows) {
 export async function dashboard(db,url,today) {
   const params = url.searchParams;
   const span = period(date(params.get('start') ?? offsetDay(today,-29)),date(params.get('end') ?? today));
+  const summary = params.get('summary')==='1';
   const compare = params.get('compare') || 'previous';
   const prior = compare === 'year' ? period(lastYear(span.start),lastYear(span.end)) :
     period(offsetDay(span.start,-span.days),offsetDay(span.start,-1));
@@ -66,7 +67,7 @@ export async function dashboard(db,url,today) {
       COALESCE(SUM(CASE WHEN e.kind='whatsapp' THEN e.total ELSE 0 END),0) AS clicks
       FROM products p JOIN stock s ON s.sku=p.sku LEFT JOIN events e ON e.sku=p.sku AND e.day BETWEEN ? AND ?
       WHERE p.state='active' AND s.on_hand>0 AND (? IS NULL OR p.type_id=?) GROUP BY p.sku`,span.start,span.end,type,type),
-    db.all(`WITH flow AS (
+    summary ? [] : db.all(`WITH flow AS (
      SELECT b.sku,
       SUM(CASE WHEN m.effective_on<? THEN m.qty ELSE 0 END) opening,
       SUM(CASE WHEN m.effective_on BETWEEN ? AND ? AND m.kind='receive' THEN m.qty ELSE 0 END) received,
@@ -98,7 +99,19 @@ export async function dashboard(db,url,today) {
       group === 'week' ? offsetDay(row.day,-((day+6)%7)) : row.day;
     series.set(bucket,[...(series.get(bucket)??[]),row]);
   }
-  return {span,prior,coverage:coverage.since,sales:summarize(sales),previous:summarize(former),snapshot,
+  const overviewSeries = [];
+  if (summary) {
+    const width = Math.ceil(span.days/7);
+    for (let index=0;index<span.days;index+=width) {
+      const start=offsetDay(span.start,index), end=offsetDay(span.start,Math.min(index+width,span.days)-1);
+      const priorStart=offsetDay(prior.start,index), priorEnd=offsetDay(prior.start,Math.min(index+width,span.days)-1);
+      const currentBucket=summarize(sales.filter(row=>row.day>=start && row.day<=end));
+      const priorBucket=summarize(former.filter(row=>row.day>=priorStart && row.day<=priorEnd));
+      overviewSeries.push({start,end,priorStart,priorEnd,net:currentBucket.revenue-currentBucket.refund,
+        previous:priorBucket.revenue-priorBucket.refund});
+    }
+  }
+  return {span,prior,coverage:coverage.since,overviewSeries,sales:summarize(sales),previous:summarize(former),snapshot,
     age,attention,interest,trends,closeout,
     slow:interest.filter(item=>!current.get(item.sku)?.units),
     low:interest.filter(item=>item.available<=3 && current.get(item.sku)?.units>0)

@@ -148,51 +148,125 @@ function signIn() {
     $('#signin-feedback').textContent='If this email has staff access, check your inbox for a sign-in link.';
   });
 }
+const staffLink = (tab,values={}) => '/staff?'+new URLSearchParams({tab,...values});
+const managerSections = [['Overview','▦'],['Orders','▤'],['Customers','◇'],['Inventory','▧'],['Reports','▥'],['Damage reports','⚑'],['Team','○']];
+
 async function openStaff() {
   try { staff=await api('/api/staff/me'); }
   catch (error) { if (error.status===401) return signIn(); throw error; }
   const manager=staff.role==='manager';
   const params=new URLSearchParams(location.search);
   const sku=params.get('sku');
-  const tabs=manager?['Dashboard','Inventory','Sales','Orders','Customers','Damage reports','CSV upload','Categories','Team']:['Inventory','My sales'];
-  activeTab=tabs.includes(params.get('tab'))?params.get('tab'):sku?'Inventory':tabs[0];
-  main.innerHTML=`<div class="shell section"><div class="sectionhead"><div><h2>${manager?'Manager dashboard':'Staff workspace'}</h2>
-    <span class="small">${esc(staff.email)}</span></div><button class="button secondary" id="signout">Sign out</button></div>
-    <nav class="tabs" aria-label="Staff sections">${tabs.map(tab=>`<button type="button" data-tab="${esc(tab)}">${esc(tab)}</button>`).join('')}</nav>
-    <div id="staffbody"></div></div>`;
+  const aliases={Dashboard:'Overview',Sales:'Orders','CSV upload':'Inventory',Categories:'Inventory'};
+  const requested=params.get('tab');
+  if (manager) {
+    if (requested==='Sales' && !params.has('view')) params.set('view','pending');
+    if (requested==='CSV upload') params.set('view','upload');
+    if (requested==='Categories') params.set('view','categories');
+  }
+  const tabs=manager?managerSections:[['Inventory','▧'],['My sales','▤']];
+  const tab=(manager?aliases[requested]:null)||requested;
+  activeTab=tabs.some(section=>section[0]===tab)?tab:sku?'Inventory':tabs[0][0];
+  document.body.classList.add('staff-workspace');
+  main.innerHTML=`<div class="workspace">
+    <button type="button" class="button secondary workspace-menu" id="workspace-menu" aria-controls="workspace-sidebar" aria-expanded="false">☰ Menu</button>
+    <aside class="workspace-sidebar" id="workspace-sidebar">
+      <a class="brand" href="/staff">Luxor <em>Moolah</em></a>
+      <nav class="workspace-nav" aria-label="Staff sections">${tabs.map(([name,icon])=>`
+        <a href="${esc(staffLink(name,name==='Orders'?{view:'pending'}:{}))}" ${name===activeTab?'aria-current="page"':''}>
+        <span class="workspace-icon" aria-hidden="true">${icon}</span>${esc(name)}
+        ${name==='Orders'?'<span id="workspace-pending" class="count-badge" hidden></span>':''}</a>`).join('')}</nav>
+      <div class="workspace-account"><span class="small">${esc(staff.email)}</span>
+        <div class="controls"><a href="/">View storefront</a><button class="button secondary" id="signout">Sign out</button></div>
+      </div>
+    </aside>
+    <div class="workspace-content" id="staffbody"></div></div>`;
+  $('#workspace-menu').addEventListener('click',event=>{
+    const open=$('#workspace-sidebar').classList.toggle('open');
+    event.currentTarget.setAttribute('aria-expanded',String(open));
+  });
   $('#signout').addEventListener('click',async()=>{try { await api('/api/auth/sign-out',{}); location.assign('/staff'); } catch(error){notify(error.message);} });
-  $$('[data-tab]').forEach(element=>element.addEventListener('click',()=>{
-    history.pushState(null,'','/staff?tab='+encodeURIComponent(element.dataset.tab));
-    loadTab(element.dataset.tab);
-  }));
-  await loadTab(activeTab,sku);
+  if (manager && activeTab!=='Overview') refreshPendingCount();
+  await loadTab(activeTab,sku,params);
 }
-async function loadTab(tab,sku=null) {
-  activeTab=tab;
-  $$('[data-tab]').forEach(element=>element.classList.toggle('active',element.dataset.tab===tab));
+async function refreshPendingCount() {
+  try { setPendingCount((await api('/api/staff/attention')).pending); } catch { /* The badge is supplementary. */ }
+}
+function setPendingCount(count) {
+  const target=$('#workspace-pending');
+  if (!target) return;
+  target.textContent=count;
+  target.hidden=!count;
+  target.setAttribute('aria-label',`${count} pending approvals`);
+}
+function workspaceHeading(title,actions='') {
+  return `<div class="workspace-heading"><h1>${esc(title)}</h1>${actions?'<div class="controls">'+actions+'</div>':''}</div>`;
+}
+function subnav(tab,views,current) {
+  return `<nav class="workspace-subnav" aria-label="${esc(tab)} views">${views.map(([key,label])=>
+    `<a href="${esc(staffLink(tab,{view:key}))}" ${key===current?'aria-current="page"':''}>${esc(label)}</a>`).join('')}</nav>`;
+}
+async function loadTab(tab,sku=null,params=new URLSearchParams(location.search)) {
   const body=$('#staffbody');
   body.innerHTML=empty('Loading…');
   try {
     if (tab==='Inventory') {
       if (sku) return await renderStaffProduct(body,sku);
+      if (staff.role==='manager') return await renderInventoryPage(body,params);
       return await renderStaffInventory(body);
     }
-    if (tab==='Sales'||tab==='My sales') return await renderSales(body);
-    if (tab==='Orders') return await renderOrders(body,new URLSearchParams(location.search).get('order'));
-    if (tab==='Customers') return await renderCustomers(body,new URLSearchParams(location.search).get('customer'));
+    if (tab==='My sales') return await renderSales(body);
+    if (tab==='Orders') {
+      if (params.has('order')) return await renderOrders(body,params.get('order'),params.get('view'));
+      return await renderOrdersPage(body,params.get('view'));
+    }
+    if (tab==='Customers') return await renderCustomers(body,params.get('customer'));
     if (tab==='Damage reports') return await renderIssues(body);
-    if (tab==='CSV upload') return await renderImport(body);
-    if (tab==='Categories') return renderCategories(body);
     if (tab==='Team') return await renderTeam(body);
-    return await renderDashboard(body);
+    if (tab==='Reports') return await renderDashboard(body,params);
+    return await renderOverview(body,params);
   } catch (error) { body.innerHTML=empty(error.message); }
 }
 async function renderStaffInventory(body) {
   const recent=await api('/api/staff/recent');
-  body.innerHTML=`${staff.role==='manager'?'<div class="actions"><h3>Inventory</h3><button class="button" id="new-product">Add item</button></div><div id="product-editor"></div>':''}
+  body.innerHTML=`${staff.role==='manager'?'<div id="product-editor"></div>':workspaceHeading('Inventory')}
     ${recent.length?`<div class="controls"><span class="small">Recently opened</span>${recent.map(item=>`<a class="button secondary" href="/staff?sku=${esc(item.sku)}">${esc(item.name)}</a>`).join('')}</div>`:''}${catalogFilters()}`;
-  $('#new-product')?.addEventListener('click',()=>renderProductEditor($('#product-editor'),null));
   wireCatalog(true);
+}
+const inventoryViews=[['all','All inventory'],['low','Low-stock sellers'],['aging','Stock over 90 days'],['upload','CSV upload'],['categories','Categories']];
+async function renderInventoryPage(body,params) {
+  const view=inventoryViews.some(([key])=>key===params.get('view'))?params.get('view'):'all';
+  body.innerHTML=workspaceHeading('Inventory',
+    `<a class="button secondary" href="${esc(staffLink('Inventory',{view:'upload'}))}">Upload CSV</a>
+    <button class="button secondary" id="receive-stock">Receive stock</button><button class="button" id="new-product">Add item</button>`)+
+    subnav('Inventory',inventoryViews,view)+'<div id="inventory-action"></div><div id="inventory-page"></div>';
+  const actions=$('#inventory-action',body);
+  $('#new-product',body).addEventListener('click',()=>renderProductEditor(actions,null));
+  $('#receive-stock',body).addEventListener('click',()=>{
+    actions.innerHTML=`<section class="frame"><h2>Receive stock</h2><form class="formgrid">
+      ${field('sku','SKU','','text','required')}${field('quantity','Units','','number','min="1" required')}
+      ${field('unit_cost','Unit cost','','number','min="0" step="0.01"')}
+      ${field('received_on','Date received or made',meta.today,'date')}${text('note','Receipt note')}
+      <div class="span">${button('Receive stock')}</div></form></section>`;
+    formHandler($('form',actions),async data=>{
+      await api('/api/staff/receipts',data);
+      notify('Stock received.'); await renderInventoryPage(body,params);
+    });
+    $('input',actions).focus();
+  });
+  const content=$('#inventory-page',body);
+  if (view==='upload') return renderImport(content);
+  if (view==='categories') return renderCategories(content);
+  if (view==='all') return renderStaffInventory(content);
+  const days=overviewDays(params.get('days'));
+  const data=await api('/api/staff/dashboard?'+overviewQuery(days));
+  const age=view==='aging';
+  const rows=age?data.age:data.low;
+  content.innerHTML=`<section class="frame"><h2>${age?'Stock over 90 days':'Low-stock sellers'}</h2>
+    ${age?'':`<p class="small">Items sold in the last ${days} days with three or fewer units available.</p>`}
+    ${dataTable(age?['Product','Oldest batch','Aged units','Cost']:['Product','Available'],
+      rows.map(row=>[staffAnchor('/staff?sku='+encodeURIComponent(row.sku),row.name+' · '+row.sku),
+        ...(age?[esc(row.oldest),row.units,esc(price(row.value))]:[row.available])]),'No matching products.')}</section>`;
 }
 function audienceInputs(selected=[]) {
   return `<fieldset class="span"><legend>Audience categories</legend><div class="controls">${meta.categories.filter(c=>c.kind==='audience')
@@ -274,14 +348,20 @@ async function renderStaffProduct(body,sku) {
   }
 }
 function table(headers,rows) {
-  return rows.length?`<div class="tablewrap"><table><thead><tr>${headers.map(title=>`<th scope="col">${esc(title)}</th>`).join('')}</tr></thead>
-    <tbody>${rows.map(row=>`<tr>${row.map(value=>`<td>${esc(value)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`:empty('No records for this report.');
+  return dataTable(headers,rows.map(row=>row.map(esc)));
 }
-async function renderSales(body) {
-  const sales=await api('/api/staff/sales');
+function dataTable(headers,rows,message='No records for this report.') {
+  return rows.length?`<div class="tablewrap"><table><thead><tr>${headers.map(title=>`<th scope="col">${esc(title)}</th>`).join('')}</tr></thead>
+    <tbody>${rows.map(row=>`<tr>${row.map(value=>`<td>${value}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`:empty(message);
+}
+function staffAnchor(url,label) {
+  return `<a href="${esc(url)}">${esc(label)}</a>`;
+}
+async function renderSales(body,view) {
+  const sales=await api('/api/staff/sales'+(view?'?view='+view:''));
   const manager=staff.role==='manager';
   const pendingCount=sales.filter(sale=>sale.status==='pending').length;
-  body.innerHTML=`<h3>${manager?'Sale approvals':'My sales'}</h3>
+  body.innerHTML=`${manager?'':workspaceHeading('My sales')}
     ${manager && pendingCount>1?`<details class="frame"><summary>Close selected items as one order</summary>
       <p class="small">Select the pending items below and enter each selling price. Use the same sale date for all items.</p>
       <form id="close-order" class="formgrid">${customerPicker()}
@@ -301,17 +381,13 @@ async function renderSales(body) {
         <div class="span controls"><button class="button" value="approved">Approve</button>
         <button class="button secondary" value="pending">Save correction</button><button class="button danger" value="canceled">Cancel sale</button></div></form>`:
         `<form data-note="${sale.id}" class="formgrid">${text('note','Correction note')}<div class="span">${button('Send note')}</div></form>`):
-        manager && sale.status==='approved' && sale.returned<sale.quantity ? `<form data-return="${sale.id}" class="formgrid">
-          ${field('returned_on','Return date',meta.today,'date','required')}<label class="check"><input name="restock" type="checkbox" checked>Return units to stock</label>
-          ${field('quantity','Units returned',sale.quantity-sale.returned,'number',`min="1" max="${sale.quantity-sale.returned}" required`)}
-          ${field('refund','Total refund','','number','min="0" step="0.01" placeholder="Defaults to original unit price"')}
-          ${text('note','Return reason')}<div class="span">${button('Record return','secondary')}</div></form>`:''}
-    </details>`).join(''):empty('No sales recorded yet.')}`;
+        manager && sale.status==='approved' && sale.returned<sale.quantity ? returnForm(sale.id,sale.quantity-sale.returned):''}
+    </details>`).join(''):empty(view==='pending'?'There are no sales waiting for approval.':'No sales recorded yet.')}`;
   $$('[data-review]',body).forEach(form=>{
     wireCustomerPicker(form);
     formHandler(form,async(data,_,submit)=>{
       await api(`/api/staff/sales/${form.dataset.review}/review`,{...data,status:submit.value});
-      notify('Sale updated.'); await renderSales(body);
+      notify('Sale updated.'); refreshPendingCount(); await renderSales(body,view);
     });
   });
   $$('[data-assign]',body).forEach(form=>{
@@ -319,7 +395,7 @@ async function renderSales(body) {
     formHandler(form,async data=>{
       if (!data.customer_id) throw new Error('Select a customer first.');
       await api(`/api/staff/sales/${form.dataset.assign}/customer`,data);
-      notify('Customer attached.'); await renderSales(body);
+      notify('Customer attached.'); await renderSales(body,view);
     });
   });
   const group=$('#close-order',body);
@@ -336,13 +412,24 @@ async function renderSales(body) {
     });
   }
   $$('[data-note]',body).forEach(form=>formHandler(form,async data=>{
-    await api(`/api/staff/sales/${form.dataset.note}/notes`,data); notify('Note sent.'); await renderSales(body);
+    await api(`/api/staff/sales/${form.dataset.note}/notes`,data); notify('Note sent.'); await renderSales(body,view);
   }));
+  wireReturns(body,()=>renderSales(body,view));
+}
+function returnForm(id,remaining) {
+  return `<form data-return="${esc(id)}" class="formgrid">
+    ${field('returned_on','Return date',meta.today,'date','required')}<label class="check"><input name="restock" type="checkbox" checked>Return units to stock</label>
+    ${field('quantity','Units returned',remaining,'number',`min="1" max="${remaining}" required`)}
+    ${field('refund','Total refund','','number','min="0" step="0.01" placeholder="Defaults to original unit price"')}
+    ${text('note','Return reason')}<div class="span">${button('Record return','secondary')}</div></form>`;
+}
+function wireReturns(body,refresh) {
   $$('[data-return]',body).forEach(form=>formHandler(form,async data=>{
-    await api(`/api/staff/sales/${form.dataset.return}/return`,{...data,restock:!!data.restock}); notify('Return recorded.'); await renderSales(body);
+    await api(`/api/staff/sales/${form.dataset.return}/return`,{...data,restock:!!data.restock});
+    notify('Return recorded.'); await refresh();
   }));
 }
-const orderLink = id => '/staff?tab=Orders&order='+encodeURIComponent(id);
+const orderLink = (id,view='all') => staffLink('Orders',{view,order:id});
 const customerLink = id => '/staff?tab=Customers&customer='+encodeURIComponent(id);
 function customerPicker(customer=null) {
   return `<fieldset class="span" data-picker><legend>Customer (optional)</legend>
@@ -432,12 +519,12 @@ async function displayOrders(target,customer=null,page=1) {
 async function renderCustomers(body,id) {
   if (id) {
     const customer=await api('/api/staff/customers/'+encodeURIComponent(id));
-    body.innerHTML=`<a href="/staff?tab=Customers">← Customers</a>
-      <section class="frame"><h3>${esc(customer.name)}</h3><p>${esc([customer.phone,customer.email].filter(Boolean).join(' · '))}</p>
+    body.innerHTML=workspaceHeading(customer.name)+`<a href="/staff?tab=Customers">← Customers</a>
+      <section class="frame"><p>${esc([customer.phone,customer.email].filter(Boolean).join(' · '))}</p>
         <h4>Purchase history</h4><div data-orders></div></section>`;
     return displayOrders($('[data-orders]',body),customer.id);
   }
-  body.innerHTML=`<h3>Customers</h3>
+  body.innerHTML=workspaceHeading('Customers')+`
     <form class="formgrid" id="customer-search">${field('q','Search customers','','search','placeholder="Name, phone, or email"')}
       <div>${button('Search','secondary')}</div></form>
     <details class="frame"><summary>Add a customer</summary><form class="formgrid" id="customer-create">
@@ -457,14 +544,34 @@ async function renderCustomers(body,id) {
   });
   await refresh();
 }
-async function renderOrders(body,id) {
-  if (!id) {
-    body.innerHTML='<h3>Orders</h3><div data-orders></div>';
-    return displayOrders($('[data-orders]',body));
-  }
+const orderViews=[['pending','Pending approval'],['all','All orders'],['returns','Returns']];
+async function renderOrdersPage(body,requested) {
+  const view=['pending','all','returns','legacy'].includes(requested)?requested:'all';
+  body.innerHTML=workspaceHeading('Orders')+subnav('Orders',orderViews,view)+'<div id="orders-page"></div>';
+  const target=$('#orders-page',body);
+  if (view==='pending' || view==='legacy') return renderSales(target,view);
+  if (view==='returns') return renderReturns(target);
+  target.innerHTML=`<p class="small">${staffAnchor(staffLink('Orders',{view:'legacy'}),'Older sales without an order')}</p><div data-orders></div>`;
+  return displayOrders($('[data-orders]',target));
+}
+async function renderReturns(target,page=1) {
+  const result=await api('/api/staff/returns?'+new URLSearchParams({page}));
+  target.innerHTML=`<section class="frame"><h2>Return history</h2>${dataTable(
+    ['Returned','Item','Order','Customer','Units','Refund','Restocked','Reason'],
+    result.items.map(row=>[esc(row.returned_on),esc(row.name+' · '+row.sku),
+      row.order_id?staffAnchor(orderLink(row.order_id,'returns'),'Order '+row.order_id.slice(0,8).toUpperCase()):
+        staffAnchor(staffLink('Orders',{view:'legacy'}),'Older sale'),
+      esc(row.customer_name||(row.order_id?'Walk-in':'—')),row.quantity,esc(price(row.refund)),row.restock?'Yes':'No',esc(row.reason)]),
+    'No returns recorded yet.')}</section>`;
+  paginate(target,result,next=>renderReturns(target,next));
+}
+async function renderOrders(body,id,from='all') {
   const order=await api('/api/staff/orders/'+encodeURIComponent(id));
   const returns=order.lines.flatMap(line=>line.returns.map(entry=>[line.name,line.sku,entry.returned_on,entry.quantity,price(entry.refund),entry.restock?'Yes':'No']));
-  body.innerHTML=`<div class="controls"><a href="/staff?tab=Orders">← Orders</a>
+  const returnable=order.lines.map(line=>({...line,remaining:line.quantity-line.returns.reduce((sum,entry)=>sum+entry.quantity,0)}))
+    .filter(line=>line.remaining>0);
+  const back=from==='returns'?'returns':'all';
+  body.innerHTML=workspaceHeading('Order '+order.id.slice(0,8).toUpperCase())+`<div class="controls">${staffAnchor(staffLink('Orders',{view:back}),back==='returns'?'← Returns':'← All orders')}
     ${order.customer_id?`<a href="${customerLink(order.customer_id)}">Customer history</a>`:''}
     <button type="button" class="button secondary" data-print>Print order summary</button></div>
     <section class="frame order-summary"><h3>Order ${esc(order.id.slice(0,8).toUpperCase())}</h3>
@@ -472,19 +579,21 @@ async function renderOrders(body,id) {
     ${table(['Item','SKU','Units','Unit price','Line total'],order.lines.map(line=>[line.name,line.sku,line.quantity,price(line.unit_price),price(line.unit_price*line.quantity)]))}
     ${returns.length?`<h4>Returns</h4>${table(['Item','SKU','Date','Units','Refund','Restocked'],returns)}`:''}
     <p><strong>Gross</strong> ${price(order.gross)} · <strong>Refunds</strong> ${price(order.refunds)} · <strong>Net</strong> ${price(order.gross-order.refunds)}</p></section>
+    ${returnable.map(line=>`<details class="frame"><summary>Return item · ${esc(line.name)} (${esc(line.sku)})</summary>${returnForm(line.id,line.remaining)}</details>`).join('')}
     <details class="frame"><summary>Change order customer</summary><form class="formgrid" data-customer-change>
       ${customerPicker({id:order.customer_id,name:order.customer_name})}<div class="span">${button('Save customer','secondary')}</div></form></details>`;
   $('[data-print]',body).addEventListener('click',()=>window.print());
+  wireReturns(body,()=>renderOrders(body,id,from));
   const form=$('[data-customer-change]',body);
   wireCustomerPicker(form);
   formHandler(form,async data=>{
     await api(`/api/staff/sales/${order.lines[0].id}/customer`,data);
-    notify('Order customer updated.'); await renderOrders(body,id);
+    notify('Order customer updated.'); await renderOrders(body,id,from);
   });
 }
 async function renderIssues(body) {
   const issues=await api('/api/staff/issues');
-  body.innerHTML=`<h3>Damage reports</h3>${issues.length?issues.map(issue=>`<div class="frame">
+  body.innerHTML=workspaceHeading('Damage reports')+`${issues.length?issues.map(issue=>`<div class="frame">
     <div class="actions"><a href="/staff?sku=${esc(issue.sku)}">${esc(issue.name)} · ${esc(issue.sku)}</a>
     ${badge(issue.resolved_at?'Resolved':'Needs review',!issue.resolved_at)}</div>
     <p>${esc(issue.note)}</p><div class="photo-row">${list(issue.photos).map(photo=>
@@ -508,7 +617,7 @@ function renderCategories(body) {
 }
 async function renderTeam(body) {
   const people=await api('/api/staff/team');
-  body.innerHTML=`<div class="frame"><h3>Invite an employee</h3><form class="formgrid" id="invite">
+  body.innerHTML=workspaceHeading('Team')+`<div class="frame"><h3>Invite an employee</h3><form class="formgrid" id="invite">
     ${field('email','Email address','','email','required')}<div>${button('Send invitation')}</div></form>
     ${people.map(person=>`<div class="actions frame"><div>${esc(person.email)} <span class="small">${esc(person.role)} · ${person.active?'Access enabled':'Access revoked'}</span></div>
     ${person.role==='employee'?`<div class="controls"><button class="button secondary" data-invite="${esc(person.email)}">${person.active?'Resend invite':'Restore and invite'}</button>
@@ -615,23 +724,153 @@ function monthsBack(value,amount) {
   const date=new Date(value.slice(0,7)+'-01T12:00:00Z');date.setUTCMonth(date.getUTCMonth()-amount);
   return date.toISOString().slice(0,10);
 }
-async function renderDashboard(body) {
-  body.innerHTML=`<form id="daterange" class="formgrid">
+const overviewPeriods=[7,30,90];
+function overviewDays(value) {
+  return overviewPeriods.includes(Number(value))?Number(value):30;
+}
+function overviewQuery(days) {
+  return new URLSearchParams({start:addDays(meta.today,1-days),end:meta.today,summary:1});
+}
+function dashboardMetric(label,value,note,link,tone='') {
+  return `<a class="dashboard-metric ${tone}" href="${esc(link)}">
+    <span class="dashboard-metric-label">${esc(label)} <span aria-hidden="true">↗</span></span>
+    <strong>${esc(value)}</strong><small>${esc(note)}</small></a>`;
+}
+const dateShort=value=>new Intl.DateTimeFormat('en',{month:'short',day:'numeric',timeZone:'UTC'}).format(new Date(value+'T12:00:00Z'));
+const netSales=values=>values.revenue-values.refund;
+function overviewChart(data,compare) {
+  const series=data.overviewSeries;
+  const hasCurrent=data.coverage && data.span.end>=data.coverage;
+  const hasComparison=compare && data.coverage && data.prior.start>=data.coverage;
+  const values=series.flatMap(row=>hasComparison?[row.net,row.previous]:[row.net]);
+  const max=Math.max(1,...values), min=Math.min(0,...values);
+  const scale=max-min;
+  const range=(from,to)=>dateShort(from)+(from===to?'':'–'+dateShort(to));
+  const makeBar=(value,label,previous=false)=>`<button type="button" class="dashboard-bar${previous?' prior':''}"
+    data-scale="${100*Math.abs(value)/scale}" data-negative="${value<0}" data-point="${esc(label)}"
+    aria-label="${esc(label)}" title="${esc(label)}"></button>`;
+  const bars=series.map(row=>{
+    const current=makeBar(row.net,range(row.start,row.end)+' · Net sales · '+price(row.net));
+    const previous=hasComparison?makeBar(row.previous,range(row.priorStart,row.priorEnd)+' · Previous period · '+price(row.previous),true):'';
+    return `<div class="dashboard-bar-group"><div class="dashboard-bar-rail">${current}${previous}</div><small>${dateShort(row.start)}</small></div>`;
+  }).join('');
+  const legend='<span><i></i> Net sales</span>'+(hasComparison?'<span><i class="prior"></i> Previous period</span>':'');
+  return `<section class="frame dashboard-panel"><div class="dashboard-panel-heading"><h2>Sales over time</h2>
+    <div class="dashboard-legend">${legend}</div></div>
+    ${hasCurrent?`<div class="dashboard-chart" data-zero="${100*max/scale}">${bars}</div>
+      <p class="small dashboard-chart-caption" aria-live="polite">Select a bar to see the amount.</p>`:empty('No sales history for this period.')}
+    ${compare && !hasComparison?'<p class="small">There’s no complete history for the comparison period yet.</p>':''}</section>`;
+}
+function wireOverviewChart(target) {
+  const chart=$('.dashboard-chart',target);
+  if (!chart) return;
+  chart.style.setProperty('--zero',chart.dataset.zero+'%');
+  for (const bar of $$('.dashboard-bar',chart)) {
+    bar.style.setProperty('--bar-height',bar.dataset.scale+'%');
+    bar.addEventListener('click',()=>$('.dashboard-chart-caption',target).textContent=bar.dataset.point);
+  }
+}
+async function renderOverview(body,params) {
+  let days=overviewDays(params.get('days'));
+  let compare=params.get('compare')!=='0';
+  body.innerHTML=workspaceHeading('Store overview',
+    `<label>Sales period<select id="overview-period">${overviewPeriods.map(day=>option(day,`Last ${day} days`,days)).join('')}</select></label>
+    <label class="check"><input id="overview-compare" type="checkbox" ${compare?'checked':''}> Compare period</label>`)+
+    '<div id="overview-content" aria-live="polite"></div>';
+  const target=$('#overview-content',body);
+  const period=$('#overview-period',body);
+  const comparison=$('#overview-compare',body);
+  let version=0;
+  async function refresh() {
+    const request=++version;
+    target.innerHTML=empty('Loading overview…');
+    try {
+      const [data,orders]=await Promise.all([api('/api/staff/dashboard?'+overviewQuery(days)),api('/api/staff/orders')]);
+      if (request!==version) return;
+      const {sales,previous,snapshot,attention,age,low}=data;
+      setPendingCount(attention.pending);
+      const reports=staffLink('Reports',{days});
+      const inventory=staffLink('Inventory');
+      const approvals=staffLink('Orders',{view:'pending'});
+      const aging=staffLink('Inventory',{view:'aging'});
+      const lowStock=staffLink('Inventory',{view:'low',days});
+      const inventoryCost=price(snapshot.value);
+      const completePrior=data.coverage && data.prior.start>=data.coverage;
+      const delta=netSales(sales)-netSales(previous);
+      const salesNote=compare && completePrior?`${delta>0?'+':''}${price(delta)} vs. previous period`:'Sales less refunds';
+      const attentionLink=(label,note,count,url)=>`<a class="attention-link" href="${esc(url)}">
+        <span><strong>${esc(label)}</strong><small>${esc(note)}</small></span>${badge(String(count),count>0)}</a>`;
+      target.innerHTML=`<section class="dashboard-section" aria-labelledby="sales-metrics"><h2 id="sales-metrics">Sales</h2>
+        <div class="dashboard-metrics dashboard-sales">
+        ${dashboardMetric('Net sales',price(netSales(sales)),salesNote,reports,'plum')}
+        ${dashboardMetric('Units sold',sales.units,`Last ${days} days`,reports)}
+        ${dashboardMetric('Pending approvals',attention.pending,'Awaiting manager review',approvals,'sand')}
+        </div></section>
+        <section class="dashboard-section" aria-labelledby="inventory-metrics"><h2 id="inventory-metrics">Inventory</h2>
+        <div class="dashboard-metrics dashboard-stock">
+        ${dashboardMetric('Units on hand',snapshot.units,'Current stock',inventory)}
+        ${dashboardMetric('Inventory cost',inventoryCost,snapshot.unknown_cost?`${snapshot.unknown_cost} units with unknown cost`:'Current stock at cost',inventory)}
+        ${dashboardMetric('Stock over 90 days',age.reduce((total,row)=>total+row.units,0),snapshot.unknown_age?`${snapshot.unknown_age} units with unknown age`:'Units in older batches',aging)}
+        ${dashboardMetric('Low-stock sellers',low.length,`Last units of items sold in ${days} days`,lowStock)}
+        </div></section>
+        <div class="dashboard-columns">${overviewChart(data,compare)}
+          <section class="frame dashboard-panel dashboard-attention"><h2>Needs attention</h2>
+          ${attentionLink('Pending approvals','Sales waiting for review',attention.pending,approvals)}
+          ${attentionLink('Damage reports','Open reports from staff',attention.issues,staffLink('Damage reports'))}
+          ${attentionLink('Low-stock sellers','Last units available',low.length,lowStock)}</section>
+        </div>
+        <section class="frame dashboard-panel"><div class="dashboard-panel-heading"><h2>Recent orders</h2>
+          ${staffAnchor(staffLink('Orders',{view:'all'}),'View all orders')}</div>
+          ${dataTable(['Order','Date','Customer','Line items','Net total'],orders.items.slice(0,5).map(order=>[
+            staffAnchor(orderLink(order.id),'Order '+order.id.slice(0,8).toUpperCase()),esc(order.sold_on),
+            order.customer_id?staffAnchor(customerLink(order.customer_id),order.customer_name):'Walk-in',
+            order.line_count,esc(price(order.gross-order.refunds))]),'No orders have been closed yet.')}</section>`;
+      wireOverviewChart(target);
+    } catch(error) {
+      if (request===version) target.innerHTML=empty(error.message);
+    }
+  }
+  const change=()=>{
+    days=Number(period.value);
+    compare=comparison.checked;
+    history.replaceState(null,'',staffLink('Overview',{days,compare:compare?1:0}));
+    refresh();
+  };
+  period.addEventListener('change',change);
+  comparison.addEventListener('change',change);
+  await refresh();
+}
+async function renderDashboard(body,params) {
+  const days=overviewDays(params.get('days'));
+  let closeoutSku='';
+  body.innerHTML=workspaceHeading('Reports')+`<div class="frame"><form id="daterange" class="formgrid">
     <label>Period<select name="preset"><option value="30">Last 30 days</option><option value="7">Last 7 days</option><option value="3m">Last three calendar months</option><option value="month">This month</option><option value="custom">Custom dates</option></select></label>
-    ${field('start','From',addDays(meta.today,-29),'date','required')}${field('end','Through',meta.today,'date','required')}
+    ${field('start','From',addDays(meta.today,1-days),'date','required')}${field('end','Through',meta.today,'date','required')}
     <label>Compare with<select name="compare"><option value="previous">Previous equivalent period</option><option value="year">Same period last year</option></select></label>
     <label>Group results<select name="group"><option value="day">Day</option><option value="week">Week</option><option value="month">Month</option></select></label>
     <label>Product type<select name="type">${options('type',null,'All product types')}</select></label>
-    ${field('sku','Closeout SKU','','text','placeholder="All SKUs"')}
-    <div class="span">${button('Apply filters')}</div></form><div id="report"></div>`;
-  const form=$('#daterange');
-  const refresh=async values=>{
-    const report=$('#report');
+    <div class="span">${button('Apply filters')}</div></form></div><div id="report"></div>`;
+  const form=$('#daterange',body);
+  if (days===7) form.elements.preset.value='7';
+  if (days===90) form.elements.preset.value='custom';
+  let reportVersion=0;
+  const refresh=async (values,showCloseout=false)=>{
+    const request=++reportVersion;
+    const report=$('#report',body);
     report.innerHTML=empty('Loading reports…');
-    try { const data=await api('/api/staff/dashboard?'+new URLSearchParams(values)); drawDashboard(report,data); }
-    catch(error){report.innerHTML=empty(error.message);}
+    try {
+      const data=await api('/api/staff/dashboard?'+new URLSearchParams({...values,sku:closeoutSku}));
+      if (request!==reportVersion) return;
+      drawDashboard(report,data,closeoutSku,showCloseout || location.hash==='#stock-closeout');
+      formHandler($('#closeout-filter',report),async filters=>{
+        const value=filters.sku.trim();
+        if (value && !/^[A-Z0-9][A-Z0-9_-]{0,39}$/i.test(value)) throw new Error('Enter a valid SKU.');
+        closeoutSku=value;
+        await refresh(format(form),true);
+      });
+    } catch(error){if (request===reportVersion) report.innerHTML=empty(error.message);}
   };
-  formHandler(form,refresh);
+  formHandler(form,values=>refresh(values));
   form.elements.preset.addEventListener('change',()=>{
     const preset=form.elements.preset.value;
     if(preset==='custom') return;
@@ -643,7 +882,7 @@ async function renderDashboard(body) {
   for(const name of ['start','end']) form.elements[name].addEventListener('change',()=>{form.elements.preset.value='custom';});
   await refresh(format(form));
 }
-function drawDashboard(report,data) {
+function drawDashboard(report,data,sku,showCloseout) {
   const metric=(label,value,caption='')=>`<div class="metric"><span class="small">${esc(label)}</span><strong>${esc(value)}</strong><small>${esc(caption)}</small></div>`;
   const section=(name,head,rows)=>`<details class="frame"><summary>${esc(name)}</summary>${table(head,rows)}</details>`;
   const net=s=>s.revenue-s.refund;
@@ -665,8 +904,10 @@ function drawDashboard(report,data) {
     ${!data.coverage||data.span.start<data.coverage?'<p class="small">Historical coverage is incomplete for the selected period.</p>':''}
     ${data.series.length?`<div class="chart">${data.series.map(row=>`<div class="chart-row"><span>${esc(row.bucket)}</span>
     <meter min="0" max="${max}" value="${row.revenue}" aria-label="Gross sales for ${esc(row.bucket)}"></meter><span>${esc(price(row.revenue))}</span></div>`).join('')}</div>`:empty('No approved sales in this date range.')}</div>
-    ${section('Stock closeout',['SKU','Opening','Received','Sold','Restocked','Adjusted','Closing'],
-      data.closeout.map(r=>[byName(r),r.opening,r.received,r.sold,r.restocked,r.adjusted,r.closing]))}
+    <details class="frame" id="stock-closeout" ${showCloseout?'open':''}><summary>Stock closeout</summary>
+      <form id="closeout-filter" class="controls">${field('sku','Closeout SKU',sku,'text','placeholder="All SKUs"')}${button('Filter stock closeout','secondary')}</form>
+      ${table(['SKU','Opening','Received','Sold','Restocked','Adjusted','Closing'],
+        data.closeout.map(r=>[byName(r),r.opening,r.received,r.sold,r.restocked,r.adjusted,r.closing]))}</details>
     ${section('Stock over 90 days',['Product','Oldest batch','Units','Cost'],data.age.map(r=>[byName(r),r.oldest,r.units,price(r.value)]))}
     ${section('Trending sales',['Product','Units','Prior units','Change'],data.trends.map(r=>[byName(r),r.units,compareOk?r.previous:'—',compareOk?r.change:'—']))}
     ${section('Low-stock sellers',['Product','Available'],data.low.map(r=>[byName(r),r.available]))}
