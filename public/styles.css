@@ -171,7 +171,9 @@ body:has(.storefront-home) .masthead .brand em{color:#f2ca8a}
 .storefront-arrival-cards .product-card{grid-template:1fr / minmax(0,40%) minmax(0,1fr);align-items:center}
 .storefront-arrival-cards .product-card:only-child{grid-column:1/-1;grid-template-columns:minmax(0,min(40%,224px)) minmax(0,1fr)}
 .storefront-home .storefront-arrival-cards .product-card > :is(.photo,.placeholder){height:100%;aspect-ratio:1.13}
-.storefront-arrival-cards .product-card > .photo,.storefront-last-card > .photo{object-fit:contain;object-position:center}
+.storefront-featured .product-card > .photo,
+.storefront-arrival-cards .product-card > .photo,
+.storefront-last-card > .photo{object-fit:contain;object-position:center}
 .storefront-arrival-cards .product-copy{min-width:0;overflow-wrap:anywhere}
 .storefront-last{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));margin-top:clamp(30px,5vw,62px);overflow:hidden;border:1px solid #75576b;border-radius:12px;background:#2d1c31;color:#fff9ec}
 .storefront-last-copy{display:grid;align-content:center;justify-items:start;gap:12px;padding:clamp(20px,4vw,46px)}
