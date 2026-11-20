@@ -428,19 +428,28 @@ function renderProductEditor(target,item) {
 const adjustmentReasons={damaged:'Damaged item',missing:'Missing item',miscount:'Stock count correction',other:'Other'};
 function stockBatches(item) {
   const batches=item.batches??[];
-  const adjustments=item.adjustments??[];
   const batchLabels=new Map(batches.map((batch,index)=>[batch.id,`Batch ${index+1}`]));
-  const batchRows=batches.flatMap((batch,index)=>[
-    [batchLabels.get(batch.id),batch.received_on??'Unknown',batch.received_quantity==null?'—':`+${batch.received_quantity}`,
-      price(batch.cost),[index===0?'Initial stock':'Stock received',batch.receipt_note].filter(Boolean).join(' · '),batch.on_hand],
-    ...adjustments.filter(entry=>entry.batch_id===batch.id).reverse().map(entry=>[
-      batchLabels.get(batch.id),entry.effective_on,entry.qty>0?`+${entry.qty}`:`−${Math.abs(entry.qty)}`,price(batch.cost),
-      [adjustmentReasons[entry.reason]??'Stock adjustment',entry.note].filter(Boolean).join(' · '),'—'
-    ])
-  ]);
-  return `<section class="frame" id="stock-batches"><h3>Stock batches</h3>
+  const byBatch=new Map();
+  for (const entry of item.movements??[]) {
+    if (!byBatch.has(entry.batch_id)) byBatch.set(entry.batch_id,[]);
+    byBatch.get(entry.batch_id).push(entry);
+  }
+  const batchRows=batches.flatMap((batch,index)=>{
+    const movements=byBatch.get(batch.id)??[];
+    const labels={receive:index===0?'Initial stock':'Stock received',sale:'Sale',return:'Return to stock',damage:'Damaged item'};
+    let onHand=0;
+    return movements.map((entry,position)=>{
+      onHand+=entry.qty;
+      const units=entry.qty<0?`−${Math.abs(entry.qty)}`:`${entry.qty>0?'+':''}${entry.qty}`;
+      const description=[labels[entry.kind]??adjustmentReasons[entry.reason]??'Stock adjustment',entry.note].filter(Boolean).join(' · ');
+      return [batchLabels.get(batch.id),entry.kind==='receive'?(batch.received_on??'Unknown'):entry.effective_on,
+        units,price(batch.cost),description].map(esc).concat(position===movements.length-1?`<strong>${onHand}</strong>`:String(onHand));
+    });
+  });
+  return `<section class="frame" id="stock-batches"><div class="actions"><h3>Stock batches</h3>
+    ${badge(`${item.on_hand} on hand`)}</div>
     <p class="small">Each receipt keeps its own date and unit cost. Use an adjustment to correct units in an existing batch.</p>
-    ${dataTable(['Batch','Date','Units','Unit cost','Description','On hand now'],batchRows.map(row=>row.map(esc)),'No stock batches yet.')}
+    ${dataTable(['Batch','Date','Units','Unit cost','Description','Balance'],batchRows,'No stock movements yet.')}
     <details class="frame"><summary>Receive more stock</summary><form id="receive" class="formgrid">
     ${field('quantity','Units','','number','min="1" step="1" required')}${moneyField('unit_cost','Unit cost','','required')}
     ${field('received_on','Date received or made',meta.today,'date','required')}${text('note','Receipt note (optional)','','maxlength="500"')}
@@ -473,13 +482,13 @@ async function renderStaffProduct(body,sku) {
     <div class="span controls">${button(manager?'Record and approve sale':'Submit for review')}</div></form></div>`:''}
     ${manager?'':`<details class="frame"><summary>Report a damaged item</summary><form id="issue" class="formgrid">${text('note','What happened?')}${photoField(false)}
     <div class="span">${button('Send report')}</div></form></details>`}
-    </section></div>
-    ${manager?`${item.state==='active'?`<details class="frame"><summary>${item.discount?'Manage clearance':'Put on clearance'}</summary>
+    ${manager&&item.state==='active'?`<details class="frame"><summary>${item.discount?'Manage clearance':'Put on clearance'}</summary>
       <form id="clearance" class="formgrid"><p class="span small">Sales price ${esc(price(item.price))}.</p>
       ${moneyField('clearance_price','Clearance price',item.discount?amount(item.sale_price):'','required')}
       <div class="span controls">${button('Save clearance price')}
       ${item.discount?'<button type="submit" class="button secondary" value="end" formnovalidate>End clearance</button>':''}</div></form></details>`:''}
-      <details class="frame"><summary>Edit item</summary><div id="product-editor"></div></details>
+    </section></div>
+    ${manager?`<details class="frame"><summary>Edit item</summary><div id="product-editor"></div></details>
       ${stockBatches(item)}`:''}`;
   wireGallery(item);
   const reload=()=>loadTab('Inventory',item.sku);
@@ -1054,22 +1063,19 @@ function drawReport(view,data,sort) {
   const total=(rows,key)=>rows.reduce((sum,row)=>sum+(row[key]??0),0);
   if (view==='sales') {
     const {sales,previous}=data;
-    const max=Math.max(1,...data.series.map(row=>row.revenue));
     return {
-      metrics:[['Net sales',price(netSales(sales)),compareOk?`${price(netSales(previous))} in comparison period`:''],
-        ['Gross profit',price(sales.profit),sales.unknown?`${sales.unknown} entries with missing cost`:''],
-        ['Refunds',price(sales.refund),`${sales.returned} units returned`]],
-      above: data.series.some(row=>row.revenue>0)?reportPanel('Gross sales over time',
-        `<div class="chart">${data.series.map(row=>`<div class="chart-row">
-          <span>${esc(row.bucket)}</span><meter min="0" max="${max}" value="${row.revenue}" aria-label="Gross sales for ${esc(row.bucket)}"></meter>
-          <span>${esc(price(row.revenue))}</span></div>`).join('')}</div>`):'',
-      results: (data.series.length || (compareOk && (previous.units || previous.returned)))?reportPanel('Sales results',
+      metrics:[['Gross sales',price(sales.revenue),'Before refunds'],
+        ['Net sales',price(netSales(sales)),'Gross sales less refunds'],
+        ['Refunds',price(sales.refund),`${sales.returned} units returned`],
+        ['Gross profit',price(sales.profit),sales.unknown?`${sales.unknown} entries with missing cost`:'Net sales less cost of goods sold']],
+      results: (sales.units || sales.returned || (compareOk && (previous.units || previous.returned)))?reportPanel('Sales results',
         `<p class="small">${esc(data.span.start)} to ${esc(data.span.end)} · Comparison ${esc(data.prior.start)} to ${esc(data.prior.end)}</p>
         ${!data.coverage||data.span.start<data.coverage?'<p class="small">Historical coverage is incomplete for the selected period.</p>':''}
         ${reportTable(['Measure','Selected period','Comparison period'],[
+          ['Gross sales',price(sales.revenue),compareOk?price(previous.revenue):'—'],
           ['Net sales',price(netSales(sales)),compareOk?price(netSales(previous)):'—'],
-          ['Gross profit',price(sales.profit),compareOk?price(previous.profit):'—'],
           ['Refunds',price(sales.refund),compareOk?price(previous.refund):'—'],
+          ['Gross profit',price(sales.profit),compareOk?price(previous.profit):'—'],
           ['Units sold',sales.units,compareOk?previous.units:'—'],
           ['Units returned',sales.returned,compareOk?previous.returned:'—']])}`):''
     };
@@ -1107,14 +1113,13 @@ async function renderDashboard(body,params) {
   body.innerHTML=workspaceHeading('Reports')+
     subnav('Reports',reportViews,view,params.has('days')?{days}:{})+
     `<h2>${esc(title)}</h2><div id="report-metrics" aria-live="polite"></div>
-    <div id="report-above"></div><div class="frame report-filters" hidden><form id="daterange" class="filter-grid">
+    <div class="frame report-filters" hidden><form id="daterange" class="filter-grid">
     ${dated?`<label>Period<select name="preset">
       ${[['7','Last 7 days'],['30','Last 30 days'],['90','Last 90 days'],['3m','Last three calendar months'],['month','This month'],['custom','Custom dates']].map(([key,label])=>option(key,label,days)).join('')}
     </select></label>
     ${field('start','From',addDays(meta.today,1-days),'date','required')}${field('end','Through',meta.today,'date','required')}`:''}
     <label>Product type<select name="type">${options('type',null,'All product types')}</select></label>
     ${compare?`<label>Compare with<select name="compare"><option value="previous">Previous equivalent period</option><option value="year">Same period last year</option></select></label>`:''}
-    ${view==='sales'?`<label>Group results<select name="group"><option value="day">Day</option><option value="week">Week</option><option value="month">Month</option></select></label>`:''}
     ${view==='closeout'?field('sku','SKU','','text','placeholder="All SKUs"'):''}
     ${view==='damage'?`<label>Status<select name="status"><option value="">All statuses</option><option value="open">Open</option><option value="resolved">Resolved</option></select></label>`:''}
     ${view==='storefront'?'<label>Sort by<select name="sort"><option value="most">Most viewed</option><option value="least">Least viewed</option></select></label>':''}
@@ -1122,15 +1127,12 @@ async function renderDashboard(body,params) {
   const form=$('#daterange',body);
   const metrics=$('#report-metrics',body);
   const target=$('#report',body);
-  const above=$('#report-above',body);
   const filterPanel=form.closest('.report-filters');
-  if (view==='sales') form.elements.group.value=days===7?'day':'week';
   let version=0;
   async function refresh() {
     const request=++version;
     target.innerHTML=empty('Loading report…');
     metrics.innerHTML='';
-    above.innerHTML='';
     try {
       const query=new URLSearchParams(format(form));
       if (view==='damage') {
@@ -1157,7 +1159,6 @@ async function renderDashboard(body,params) {
         const hasHistory=(view==='sales'||view==='themes') ? data.hasSales : view==='closeout' && data.hasStockHistory;
         filterPanel.hidden=view!=='storefront' && filterPanel.hidden && !report.results && !hasHistory;
         metrics.innerHTML=reportMetrics(report.metrics);
-        above.innerHTML=report.above??'';
         target.innerHTML=report.results || (filterPanel.hidden?'':'<p class="small">No records match these filters.</p>');
       }
     } catch(error) { if (request===version) target.innerHTML=empty(error.message); }
@@ -1173,7 +1174,6 @@ async function renderDashboard(body,params) {
       if (preset==='custom') return;
       form.elements.start.value=preset==='3m'?monthsBack(meta.today,2):preset==='month'?meta.today.slice(0,7)+'-01':addDays(meta.today,1-Number(preset));
       form.elements.end.value=meta.today;
-      if (view==='sales') form.elements.group.value=preset==='3m'?'month':preset==='7'?'day':'week';
     });
     for(const name of ['start','end']) form.elements[name].addEventListener('change',()=>{form.elements.preset.value='custom';});
   }

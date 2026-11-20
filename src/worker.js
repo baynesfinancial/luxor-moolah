@@ -131,15 +131,21 @@ async function itemDetail(db, sku, user) {
     Object.assign(item,await db.one('SELECT price,sale_price,discount,state,personal_note FROM products WHERE sku=?',sku));
     item.themes = (await db.all('SELECT theme FROM product_themes WHERE sku=? ORDER BY theme_key',sku))
       .map(row=>row.theme).join(', ');
-    item.batches = await db.all(`SELECT b.id,b.received_on,b.cost,balances.on_hand,m.qty AS received_quantity,m.note AS receipt_note
-      FROM batches b JOIN batch_balances balances ON balances.id=b.id
-      LEFT JOIN movements m ON m.rowid=(SELECT rowid FROM movements WHERE batch_id=b.id AND kind='receive' ORDER BY rowid LIMIT 1)
-      WHERE b.sku=? ORDER BY b.rowid`,sku);
+    const [batches,movements] = await db.batch([
+      db.sql(`SELECT b.id,b.received_on,b.cost,balances.on_hand,m.qty AS received_quantity,m.note AS receipt_note
+        FROM batches b JOIN batch_balances balances ON balances.id=b.id
+        LEFT JOIN movements m ON m.rowid=(SELECT rowid FROM movements WHERE batch_id=b.id AND kind='receive' ORDER BY rowid LIMIT 1)
+        WHERE b.sku=? ORDER BY b.rowid`,sku),
+      db.sql(`SELECT m.batch_id,m.kind,m.qty,m.effective_on,m.reason,m.note,u.email AS actor_email
+        FROM movements m JOIN batches b ON b.id=m.batch_id LEFT JOIN users u ON u.id=m.actor
+        WHERE b.sku=? ORDER BY m.rowid`,sku)
+    ]);
+    item.batches = batches.results;
+    item.movements = movements.results;
     item.has_stock_history = item.batches.length > 0;
     item.on_hand = item.batches.reduce((sum,batch)=>sum+batch.on_hand,0);
-    item.adjustments = await db.all(`SELECT m.batch_id,m.qty,m.effective_on,m.reason,m.note,u.email AS actor_email
-      FROM movements m JOIN batches b ON b.id=m.batch_id LEFT JOIN users u ON u.id=m.actor
-      WHERE b.sku=? AND m.kind='adjust' ORDER BY m.created_at DESC,m.rowid DESC`,sku);
+    item.adjustments = item.movements.filter(entry=>entry.kind==='adjust').reverse()
+      .map(({kind,...entry})=>entry);
   }
   if (user?.role === 'employee') {
     const state = await db.one('SELECT state FROM products WHERE sku=?',sku);
