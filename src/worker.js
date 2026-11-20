@@ -51,7 +51,13 @@ async function productPayload(db, input) {
   const salePrice = money(input.sale_price);
   assert(salePrice == null || (price != null && salePrice <= price),'Sale price must be at or below the regular price.');
   const description = clean(input.description,4000);
-  return {name,description,audience,type,price,salePrice,discount:input.discount && salePrice != null ? 1 : 0};
+  const themes = input.themes == null ? null : [...new Map(
+    clean(input.themes,500).split(/[|,]/).map(theme=>theme.trim().replace(/\s+/g,' ')).filter(Boolean)
+      .map(theme=>[theme.toLowerCase(),theme])
+  )];
+  assert(!themes || (themes.length<=8 && themes.every(([,theme])=>theme.length<=45)),
+    'Use up to eight themes of 45 characters each.');
+  return {name,description,audience,type,price,salePrice,themes,discount:input.discount && salePrice != null ? 1 : 0};
 }
 function saveProduct(db, sku, item, state, existing) {
   assert(item.name,'Enter a product name.');
@@ -63,8 +69,13 @@ function saveProduct(db, sku, item, state, existing) {
     : db.sql(`INSERT INTO products(sku,name,description,type_id,price,sale_price,discount,state,published_at)
       VALUES(?,?,?,?,?,?,?,?,CASE WHEN ?='active' THEN CURRENT_TIMESTAMP ELSE NULL END)`,
       sku,item.name,item.description,item.type,item.price,item.salePrice,item.discount,state,state);
-  return [write, db.sql('DELETE FROM product_categories WHERE sku=?',sku),
+  const statements = [write, db.sql('DELETE FROM product_categories WHERE sku=?',sku),
     ...item.audience.map(category => db.sql('INSERT INTO product_categories VALUES(?,?)',sku,category))];
+  if (item.themes) {
+    statements.push(db.sql('DELETE FROM product_themes WHERE sku=?',sku),
+      ...item.themes.map(([key,theme])=>db.sql('INSERT INTO product_themes VALUES(?,?,?)',sku,key,theme)));
+  }
+  return statements;
 }
 async function photoStatements(db,user,photos,sku,issue = null) {
   assert(Array.isArray(photos) && photos.length <= 16,'Select up to 16 photos.');
@@ -109,6 +120,8 @@ async function itemDetail(db, sku, user) {
   item.photos = await db.all('SELECT id FROM photos WHERE sku=? ORDER BY position,id',sku);
   if (user?.role === 'manager') {
     Object.assign(item,await db.one('SELECT price,sale_price,discount,state FROM products WHERE sku=?',sku));
+    item.themes = (await db.all('SELECT theme FROM product_themes WHERE sku=? ORDER BY theme_key',sku))
+      .map(row=>row.theme).join(', ');
     item.batches = await db.all('SELECT * FROM batch_balances WHERE sku=? ORDER BY received_on,id',sku);
   }
   if (user?.role === 'employee') {

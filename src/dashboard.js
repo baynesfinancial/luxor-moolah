@@ -38,6 +38,22 @@ function summarize(rows) {
     refund:total.refund+row.refund, profit:total.profit+(row.profit??0), unknown:total.unknown+Number(row.profit==null)
   }),{units:0,revenue:0,returned:0,refund:0,profit:0,unknown:0});
 }
+async function productThemeTrends(db,span,prior,type) {
+  return db.all(`WITH sku_sales AS (
+    SELECT s.sku,
+      SUM(CASE WHEN s.sold_on BETWEEN ? AND ? THEN s.quantity ELSE 0 END) AS units,
+      SUM(CASE WHEN s.sold_on BETWEEN ? AND ? THEN s.quantity ELSE 0 END) AS previous
+    FROM sales s JOIN products p ON p.sku=s.sku
+    WHERE s.status='approved' AND (? IS NULL OR p.type_id=?)
+      AND (s.sold_on BETWEEN ? AND ? OR s.sold_on BETWEEN ? AND ?)
+    GROUP BY s.sku
+  )
+  SELECT MIN(t.theme) AS name,SUM(s.units) AS units,SUM(s.previous) AS previous,
+    SUM(s.units-s.previous) AS change,SUM(s.units>0) AS sku_count
+  FROM sku_sales s JOIN product_themes t ON t.sku=s.sku
+  GROUP BY t.theme_key ORDER BY units DESC,change DESC,name COLLATE NOCASE`,
+  span.start,span.end,prior.start,prior.end,type,type,span.start,span.end,prior.start,prior.end);
+}
 export async function dashboard(db,url,today) {
   const params = url.searchParams;
   const span = period(date(params.get('start') ?? offsetDay(today,-29)),date(params.get('end') ?? today));
@@ -50,7 +66,7 @@ export async function dashboard(db,url,today) {
   const cutoff = offsetDay(today,-90);
   const coverage = await db.one(`SELECT MIN(day) AS since FROM
     (SELECT MIN(date(created_at)) AS day FROM movements UNION ALL SELECT MIN(sold_on) FROM sales WHERE status='approved')`);
-  const [sales,former,snapshot,age,attention,interest,closeout] = await Promise.all([
+  const [sales,former,snapshot,age,attention,interest,themeTrends,closeout] = await Promise.all([
     salesIn(db,span,type),salesIn(db,prior,type),
     db.one(`SELECT COALESCE(SUM(b.on_hand*b.cost),0) AS value,
       COALESCE(SUM(CASE WHEN b.cost IS NULL THEN b.on_hand ELSE 0 END),0) AS unknown_cost,
@@ -67,6 +83,7 @@ export async function dashboard(db,url,today) {
       COALESCE(SUM(CASE WHEN e.kind='whatsapp' THEN e.total ELSE 0 END),0) AS clicks
       FROM products p JOIN stock s ON s.sku=p.sku LEFT JOIN events e ON e.sku=p.sku AND e.day BETWEEN ? AND ?
       WHERE p.state='active' AND s.on_hand>0 AND (? IS NULL OR p.type_id=?) GROUP BY p.sku`,span.start,span.end,type,type),
+    productThemeTrends(db,span,prior,type),
     summary ? [] : db.all(`WITH flow AS (
      SELECT b.sku,
       SUM(CASE WHEN m.effective_on<? THEN m.qty ELSE 0 END) opening,
@@ -112,7 +129,7 @@ export async function dashboard(db,url,today) {
     }
   }
   return {span,prior,coverage:coverage.since,overviewSeries,sales:summarize(sales),previous:summarize(former),snapshot,
-    age,attention,interest,trends,closeout,
+    age,attention,interest,trends,themeTrends,closeout,
     slow:interest.filter(item=>!current.get(item.sku)?.units),
     low:interest.filter(item=>item.available<=3 && current.get(item.sku)?.units>0)
       .sort((a,b)=>current.get(b.sku).units-current.get(a.sku).units),

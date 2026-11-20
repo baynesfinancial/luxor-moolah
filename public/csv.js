@@ -1,4 +1,4 @@
-export const headers = ['sku','name','description','categories','subcategory','quantity','unit_cost','price','sale_price','received_on','image_files'];
+export const headers = ['sku','name','description','categories','subcategory','quantity','unit_cost','price','sale_price','received_on','image_files','themes'];
 
 export function parseCSV(content) {
   const source=content.replace(/^\uFEFF/,'');
@@ -41,6 +41,7 @@ export function draftRows(table,files,categories){
   for(const [index,row] of table.slice(1).entries()){
     if(!row.some(value=>value.trim()))continue;
     const fields=Object.fromEntries(headers.map(name=>[name,row[heading.indexOf(name)]?.trim()??'']));
+    if (!heading.includes('themes')) delete fields.themes;
     const errors=[];
     if(row.length!==heading.length)errors.push('Field count does not match the CSV header');
     const sku=fields.sku.toUpperCase();

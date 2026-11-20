@@ -4,11 +4,12 @@ import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { draftRows, parseCSV } from '../public/csv.js';
 import { date, dayInZone, money, skuOf } from '../src/helpers.js';
+import { dashboard } from '../src/dashboard.js';
 import { createCustomer, listOrders, orderDetail, searchCustomers } from '../src/customers.js';
 
 function database() {
   const db=new DatabaseSync(':memory:');
-  for (const file of ['0001_inventory.sql','0002_better_auth.sql','0003_customer_orders.sql']) {
+  for (const file of ['0001_inventory.sql','0002_better_auth.sql','0003_customer_orders.sql','0004_product_themes.sql']) {
     db.exec(readFileSync(new URL('../migrations/'+file,import.meta.url),'utf8'));
   }
   db.exec(`INSERT INTO users VALUES('manager','admin@example.com','manager',1),('employee','staff@example.com','employee',1);
@@ -46,6 +47,7 @@ test('CSV supports quoted descriptions and duplicate or missing photos are flagg
   const result=draftRows(rows,[{name:'a.jpg'}],[{id:1,kind:'audience',name:'Men'},{id:5,kind:'type',name:'Mugs'}]);
   assert.equal(result[0].payload.description,'Brown, with "ears"');
   assert.equal(result[0].payload.type_id,5);
+  assert.equal(result[0].payload.themes,undefined);
   assert.match(result[0].errors.join(' '),/Missing photo b.jpg/);
   assert.match(result[0].errors.join(' '),/Duplicate SKU/);
   assert.match(result[1].errors.join(' '),/Duplicate SKU/);
@@ -86,4 +88,22 @@ test('customer search, grouped order history and returns count each line once',a
   const detail=await orderDetail(db,'o1');
   assert.equal(detail.lines.find(line=>line.id==='s2').returns.length,2);
   assert.equal(sqlite.prepare('SELECT on_hand FROM stock').get().on_hand,1);
+});
+
+test('theme reporting groups distinct sold-out SKUs across periods',async()=>{
+  const sqlite=database();
+  sqlite.exec(`INSERT INTO products(sku,name,price,state) VALUES('LM16','Owl mug',180000,'active');
+    INSERT INTO batches(id,sku,received_on,cost) VALUES('owl','LM16','2026-02-01',95000);
+    INSERT INTO movements(id,batch_id,kind,qty,effective_on) VALUES('owl-in','owl','receive',1,'2026-02-01');
+    INSERT INTO product_themes VALUES('LM15','animal mugs','Animal mugs'),('LM16','animal mugs','animal mugs');
+    INSERT INTO sales(id,sku,quantity,sold_on,submitted_by) VALUES
+      ('s1','LM15',2,'2026-02-11','employee'),('s2','LM16',1,'2026-02-12','employee'),('s3','LM15',1,'2026-01-10','employee');
+    UPDATE sales SET status='approved',unit_price=150000;`);
+  assert.ok(sqlite.prepare('SELECT * FROM stock').all().every(row=>row.on_hand===0));
+  const db={
+    async one(query,...params) { return sqlite.prepare(query).get(...params); },
+    async all(query,...params) { return sqlite.prepare(query).all(...params); }
+  };
+  const result=await dashboard(db,new URL('https://shop.test/?start=2026-02-01&end=2026-02-28&summary=1'),'2026-02-28');
+  assert.deepEqual(result.themeTrends.map(row=>({...row})),[{name:'Animal mugs',units:3,previous:1,change:2,sku_count:2}]);
 });

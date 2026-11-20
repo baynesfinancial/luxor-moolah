@@ -279,7 +279,9 @@ function itemFields(item={},existing=false) {
     ${field('price','Regular selling price',item.price,'number','min="0" step="0.01"')}
     ${field('sale_price','Sale price',item.sale_price,'number','min="0" step="0.01"')}
     <label class="check"><input name="discount" type="checkbox" ${item.discount?'checked':''}>Use sale price on storefront</label>
-    ${text('description','Description',item.description)}${audienceInputs(item.categories??[])}`;
+    ${text('description','Description',item.description)}${audienceInputs(item.categories??[])}
+    <div class="span">${field('themes','Product themes',item.themes,'text','placeholder="Animal mugs, woodland gifts"')}
+    <small>Separate themes with commas. Use the same theme on similar products to compare sales across SKUs.</small></div>`;
 }
 function normalizeItem(data,form) {
   data.categories=new FormData(form).getAll('category');
@@ -694,6 +696,8 @@ async function showDrafts() {
     drafts.map(draftForm).join(''):empty('No imported drafts awaiting approval.');
   $$('[data-draft]',target).forEach(form=>formHandler(form,async data=>{
     normalizeItem(data,form);
+    const source=drafts.find(row=>row.id===form.dataset.draft);
+    if (source.payload.themes==null && !data.themes.trim()) delete data.themes;
     data.publish=!!data.publish;
     assertChoice(data.action);
     await api(`/api/staff/imports/${form.dataset.draft}/approve`,data);
@@ -761,6 +765,15 @@ function overviewChart(data,compare) {
       <p class="small dashboard-chart-caption" aria-live="polite">Select a bar to see the amount.</p>`:empty('No sales history for this period.')}
     ${compare && !hasComparison?'<p class="small">There’s no complete history for the comparison period yet.</p>':''}</section>`;
 }
+function overviewThemes(themes,canCompare,days) {
+  const current=themes.filter(theme=>theme.units>0);
+  if (canCompare) current.sort((a,b)=>b.change-a.change || b.units-a.units);
+  return `<section class="frame dashboard-panel dashboard-themes"><div class="dashboard-panel-heading"><h2>Product themes</h2>
+    ${staffAnchor(staffLink('Reports',{days})+'#theme-trends','View trends')}</div>
+    ${current.length?dataTable(['Theme','Units sold',...(canCompare?['Change']:[])],current.slice(0,3).map(theme=>[
+      esc(theme.name),theme.units,...(canCompare?[(theme.change>0?'+':'')+theme.change]:[])
+    ])):empty('Add themes to similar products to see what’s selling across SKUs.')}</section>`;
+}
 function wireOverviewChart(target) {
   const chart=$('.dashboard-chart',target);
   if (!chart) return;
@@ -814,10 +827,11 @@ async function renderOverview(body,params) {
         ${dashboardMetric('Low-stock sellers',low.length,`Last units of items sold in ${days} days`,lowStock)}
         </div></section>
         <div class="dashboard-columns">${overviewChart(data,compare)}
-          <section class="frame dashboard-panel dashboard-attention"><h2>Needs attention</h2>
+          <div class="dashboard-side"><section class="frame dashboard-panel dashboard-attention"><h2>Needs attention</h2>
           ${attentionLink('Pending approvals','Sales waiting for review',attention.pending,approvals)}
           ${attentionLink('Damage reports','Open reports from staff',attention.issues,staffLink('Damage reports'))}
           ${attentionLink('Low-stock sellers','Last units available',low.length,lowStock)}</section>
+          ${overviewThemes(data.themeTrends,compare && completePrior,days)}</div>
         </div>
         <section class="frame dashboard-panel"><div class="dashboard-panel-heading"><h2>Recent orders</h2>
           ${staffAnchor(staffLink('Orders',{view:'all'}),'View all orders')}</div>
@@ -881,6 +895,7 @@ async function renderDashboard(body,params) {
   });
   for(const name of ['start','end']) form.elements[name].addEventListener('change',()=>{form.elements.preset.value='custom';});
   await refresh(format(form));
+  if (location.hash==='#theme-trends') $('#theme-trends',body)?.scrollIntoView();
 }
 function drawDashboard(report,data,sku,showCloseout) {
   const metric=(label,value,caption='')=>`<div class="metric"><span class="small">${esc(label)}</span><strong>${esc(value)}</strong><small>${esc(caption)}</small></div>`;
@@ -909,6 +924,11 @@ function drawDashboard(report,data,sku,showCloseout) {
       ${table(['SKU','Opening','Received','Sold','Restocked','Adjusted','Closing'],
         data.closeout.map(r=>[byName(r),r.opening,r.received,r.sold,r.restocked,r.adjusted,r.closing]))}</details>
     ${section('Stock over 90 days',['Product','Oldest batch','Units','Cost'],data.age.map(r=>[byName(r),r.oldest,r.units,price(r.value)]))}
+    <details class="frame" id="theme-trends" ${location.hash==='#theme-trends'?'open':''}><summary>Product theme trends</summary>
+      <p class="small">Approved units sold across SKUs, including sold-out items. An item can count toward more than one theme.</p>
+      ${table(['Theme','Units sold','Distinct SKUs sold','Prior units','Change'],data.themeTrends.map(theme=>[
+        theme.name,theme.units,theme.sku_count,compareOk?theme.previous:'—',compareOk?theme.change:'—'
+      ]))}</details>
     ${section('Trending sales',['Product','Units','Prior units','Change'],data.trends.map(r=>[byName(r),r.units,compareOk?r.previous:'—',compareOk?r.change:'—']))}
     ${section('Low-stock sellers',['Product','Available'],data.low.map(r=>[byName(r),r.available]))}
     ${section('No approved sales in this period',['Product','Available'],data.slow.map(r=>[byName(r),r.available]))}

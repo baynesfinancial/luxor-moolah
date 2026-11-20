@@ -77,3 +77,5 @@ label,.field{display:grid;gap:6px;font-size:.87rem;font-weight:650;align-content
 .dashboard-metrics{gap:8px}.dashboard-metric{padding:10px}.dashboard-sales{grid-template-columns:repeat(2,minmax(0,1fr))}
 .dashboard-sales .dashboard-metric:first-child{grid-column:1/-1}.dashboard-bar-rail{height:120px}}
 @media print{body:has(.order-summary) :is(.workspace-sidebar,.workspace-menu,.workspace-heading){display:none}body:has(.order-summary) .workspace{display:block}}
+.dashboard-side{min-width:0}
+@media(max-width:710px){.dashboard-side{display:contents}.dashboard-themes{order:1}}

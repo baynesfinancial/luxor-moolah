@@ -1,2 +1,2 @@
-sku,name,description,categories,subcategory,quantity,unit_cost,price,sale_price,received_on,image_files
-LM15,Brown bear mug,A brown mug with a bear design,Men|Women,Mugs,2,900,1500,,2026-11-19,LM15-front.jpg|LM15-side.jpg|LM15-detail.jpg
+sku,name,description,categories,subcategory,quantity,unit_cost,price,sale_price,received_on,image_files,themes
+LM15,Brown bear mug,A brown mug with a bear design,Men|Women,Mugs,2,900,1500,,2026-11-19,LM15-front.jpg|LM15-side.jpg|LM15-detail.jpg,Animal mugs|Woodland gifts
