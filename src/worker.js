@@ -30,9 +30,8 @@ function transactionDay(input, today, fallback = today) {
   assert(day <= today,'The date cannot be in the future.');
   return day;
 }
-function addStock(db, user, sku, quantity, cost, receivedOn, today, note) {
+function addStock(db, user, sku, quantity, cost, receivedOn, today, note, batch=id()) {
   if (!quantity) return [];
-  const batch = id();
   return [
     db.sql('INSERT INTO batches(id,sku,cost,received_on) VALUES(?,?,?,?)',batch,sku,cost,receivedOn),
     db.sql("INSERT INTO movements(id,batch_id,kind,qty,effective_on,actor,note) VALUES(?,?,'receive',?,?,?,?)",
@@ -48,8 +47,6 @@ async function productPayload(db, input) {
   assert(!type || categoryList.some(row => row.id === type && row.kind === 'type'),'Unknown product type.');
   const name = clean(input.name);
   const price = money(input.price);
-  const salePrice = money(input.sale_price);
-  assert(salePrice == null || (price != null && salePrice <= price),'Sale price must be at or below the regular price.');
   const description = clean(input.description,4000);
   const themes = input.themes == null ? null : [...new Map(
     clean(input.themes,500).split(/[|,]/).map(theme=>theme.trim().replace(/\s+/g,' ')).filter(Boolean)
@@ -57,18 +54,19 @@ async function productPayload(db, input) {
   )];
   assert(!themes || (themes.length<=8 && themes.every(([,theme])=>theme.length<=45)),
     'Use up to eight themes of 45 characters each.');
-  return {name,description,audience,type,price,salePrice,themes,discount:input.discount && salePrice != null ? 1 : 0};
+  return {name,description,audience,type,price,themes};
 }
 function saveProduct(db, sku, item, state, existing) {
   assert(item.name,'Enter a product name.');
   assert(state !== 'active' || item.price != null,'Enter a valid selling price before publishing.');
   const write = existing
-    ? db.sql(`UPDATE products SET name=?,description=?,type_id=?,price=?,sale_price=?,discount=?,
+    ? db.sql(`UPDATE products SET name=?,description=?,type_id=?,
+      price=CASE WHEN discount=1 AND sale_price IS NOT NULL AND (? IS NULL OR sale_price>=?) THEN -1 ELSE ? END,
       published_at=CASE WHEN state<>'active' AND ?='active' THEN CURRENT_TIMESTAMP ELSE published_at END,state=? WHERE sku=?`,
-      item.name,item.description,item.type,item.price,item.salePrice,item.discount,state,state,sku)
+      item.name,item.description,item.type,item.price,item.price,item.price,state,state,sku)
     : db.sql(`INSERT INTO products(sku,name,description,type_id,price,sale_price,discount,state,published_at)
       VALUES(?,?,?,?,?,?,?,?,CASE WHEN ?='active' THEN CURRENT_TIMESTAMP ELSE NULL END)`,
-      sku,item.name,item.description,item.type,item.price,item.salePrice,item.discount,state,state);
+      sku,item.name,item.description,item.type,item.price,null,0,state,state);
   const statements = [write, db.sql('DELETE FROM product_categories WHERE sku=?',sku),
     ...item.audience.map(category => db.sql('INSERT INTO product_categories VALUES(?,?)',sku,category))];
   if (item.themes) {
@@ -76,6 +74,14 @@ function saveProduct(db, sku, item, state, existing) {
       ...item.themes.map(([key,theme])=>db.sql('INSERT INTO product_themes VALUES(?,?,?)',sku,key,theme)));
   }
   return statements;
+}
+function validateListing(item,state,existing,openingQuantity=0) {
+  if (state==='active' && existing?.state!=='active') {
+    assert((existing?.on_hand??0)+openingQuantity>0,'Enter a starting quantity before publishing.');
+  }
+  if (existing?.discount && existing.sale_price!=null) {
+    assert(item.price!=null && item.price>existing.sale_price,'Set a selling price above the current clearance price or end clearance first.');
+  }
 }
 async function photoStatements(db,user,photos,sku,issue = null) {
   assert(Array.isArray(photos) && photos.length <= 16,'Select up to 16 photos.');
@@ -122,7 +128,8 @@ async function itemDetail(db, sku, user) {
     Object.assign(item,await db.one('SELECT price,sale_price,discount,state FROM products WHERE sku=?',sku));
     item.themes = (await db.all('SELECT theme FROM product_themes WHERE sku=? ORDER BY theme_key',sku))
       .map(row=>row.theme).join(', ');
-    item.batches = await db.all('SELECT * FROM batch_balances WHERE sku=? ORDER BY received_on,id',sku);
+    Object.assign(item,await db.one(`SELECT EXISTS(SELECT 1 FROM batches WHERE sku=?) AS has_stock_history,
+      (SELECT on_hand FROM stock WHERE sku=?) AS on_hand`,sku,sku));
   }
   if (user?.role === 'employee') {
     const state = await db.one('SELECT state FROM products WHERE sku=?',sku);
@@ -218,7 +225,7 @@ async function resolveImport(db,user,rowId,input,today) {
   const merged = {...draft,...input};
   const item = await productPayload(db,merged);
   const sku = draft.sku ? skuOf(draft.sku) : merged.sku ? skuOf(merged.sku) : 'LM-'+id().slice(0,8).toUpperCase();
-  const exists = await db.one('SELECT state FROM products WHERE sku=?',sku);
+  const exists = await db.one('SELECT p.state,p.sale_price,p.discount,s.on_hand FROM products p JOIN stock s USING(sku) WHERE p.sku=?',sku);
   const action = input.action;
   assert(exists ? ['update','receive'].includes(action) : action === 'create',
     exists ? 'That SKU exists. Choose update listing or receive stock.' : 'Choose create for this new SKU.');
@@ -229,6 +236,8 @@ async function resolveImport(db,user,rowId,input,today) {
   if (receivedOn) transactionDay(receivedOn,today);
   assert(action !== 'receive' || quantity > 0,'Enter the quantity to receive.');
   assert(action !== 'create' || !input.publish || quantity > 0,'Enter opening stock before publishing.');
+  if (action==='create' && quantity) assert(cost!=null,'Enter the cost per unit.');
+  if (action!=='receive') validateListing(item,state,exists,quantity);
   const writes = [db.sql('INSERT INTO applied_imports VALUES(?)',rowId)];
   if (action !== 'receive') writes.push(...saveProduct(db,sku,item,state,exists));
   if (action !== 'update') writes.push(...addStock(db,user,sku,quantity,cost,receivedOn,today,'CSV import'));
@@ -410,15 +419,44 @@ async function api(request,env,db,url) {
     else await db.run('INSERT INTO categories(kind,name) VALUES(?,?)',input.kind,name);
     return json({});
   }
+  const clearance = path.match(/^\/api\/staff\/product\/([A-Za-z0-9_-]+)\/clearance$/);
+  if (clearance) {
+    const sku=skuOf(clearance[1]);
+    const product=await db.one('SELECT price FROM products WHERE sku=?',sku);
+    assert(product,'Product unavailable.',404);
+    const reduced=input.remove===true?null:money(input.clearance_price);
+    assert(input.remove===true || (reduced!=null && product.price!=null && reduced<product.price),
+      'Enter a clearance price below the selling price.');
+    const [result]=await db.batch([
+      db.sql(`UPDATE products SET sale_price=?,discount=? WHERE sku=? AND (? IS NULL OR price>?)`,
+        reduced,reduced===null?0:1,sku,reduced,reduced),
+      audit(db,user,reduced===null?'product.clearance.end':'product.clearance.set',sku)
+    ]);
+    assert(result.meta.changes,'The selling price changed. Refresh and try again.',409);
+    return json({sku});
+  }
   if (path === '/api/staff/product') {
     const existingSku = input.existing_sku ? skuOf(input.existing_sku) : null;
     const sku = existingSku ?? (input.sku ? skuOf(input.sku) : 'LM-'+id().slice(0,8).toUpperCase());
-    const existing = await db.one('SELECT 1 FROM products WHERE sku=?',sku);
+    const existing = await db.one(`SELECT p.state,p.sale_price,p.discount,s.on_hand,
+      EXISTS(SELECT 1 FROM batches b WHERE b.sku=p.sku) AS has_stock_history
+      FROM products p JOIN stock s USING(sku) WHERE p.sku=?`,sku);
     assert(existingSku ? existing : !existing, existingSku ? 'Product unavailable.' : 'This SKU already exists.',409);
     const item = await productPayload(db,input);
     const state = input.state ?? 'draft';
     assert(['draft','active','archived'].includes(state),'Select a listing status.');
-    const statements = [...saveProduct(db,sku,item,state,existing),...await photoStatements(db,user,input.photos ?? [],sku)];
+    const openingQuantity=units(input.quantity,true)??0;
+    const unitCost=money(input.unit_cost);
+    const received=date(input.received_on,true)??today;
+    if (openingQuantity) {
+      assert(!existing?.has_stock_history,'Starting stock is already recorded for this SKU.',409);
+      assert(unitCost!=null,'Enter the cost per unit.');
+      transactionDay(received,today);
+    }
+    validateListing(item,state,existing,openingQuantity);
+    const statements = [...saveProduct(db,sku,item,state,existing),
+      ...addStock(db,user,sku,openingQuantity,unitCost,received,today,null,`opening:${sku}`),
+      ...await photoStatements(db,user,input.photos ?? [],sku)];
     if (Array.isArray(input.photo_order)) {
       for (const [position,image] of input.photo_order.slice(0,100).entries()) {
         statements.push(db.sql('UPDATE photos SET position=? WHERE sku=? AND id=?',position,sku,image));
@@ -538,6 +576,7 @@ export default {
         if (message.includes(readable)) return json({error:readable+'.'},409);
       }
       if (message.includes('NOT NULL constraint failed: orders.id')) return json({error:'The sale changed. Refresh and try again.'},409);
+      if (message.includes('CHECK constraint failed: price>=0')) return json({error:'The clearance price changed. Refresh and try again.'},409);
       if (message.includes('UNIQUE constraint failed')) return json({error:'This record already exists. Refresh and try again.'},409);
       console.error(message);
       return json({error:message.includes('no such table') ? migrationsHint : 'The request could not be completed.'},500);

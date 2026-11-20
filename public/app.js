@@ -239,49 +239,25 @@ async function renderInventoryPage(body,params) {
   const view=inventoryViews.some(([key])=>key===params.get('view'))?params.get('view'):'all';
   body.innerHTML=workspaceHeading('Inventory',
     `<a class="button secondary" href="${esc(staffLink('Inventory',{view:'upload'}))}">Upload CSV</a>
-    <button type="button" class="button secondary" id="receive-stock" aria-controls="inventory-action" aria-expanded="false">Receive stock</button>
     <button type="button" class="button" id="new-product" aria-controls="inventory-action" aria-expanded="false">Add item</button>`)+
     subnav('Inventory',inventoryViews,view)+'<div id="inventory-action"></div><div id="inventory-page"></div>';
   const actions=$('#inventory-action',body);
   const add=$('#new-product',body);
-  const receive=$('#receive-stock',body);
-  let openTrigger=null;
-  function closeAction(restoreFocus=true) {
-    const trigger=openTrigger;
-    trigger?.setAttribute('aria-expanded','false');
+  function closeAction() {
     actions.replaceChildren();
-    openTrigger=null;
-    if (restoreFocus) trigger?.focus();
-  }
-  function toggleAction(trigger,render) {
-    if (openTrigger===trigger) return closeAction();
-    closeAction(false);
-    openTrigger=trigger;
-    trigger.setAttribute('aria-expanded','true');
-    render();
-    $('[data-close-inventory]',actions).addEventListener('click',()=>closeAction());
-    $('input',actions).focus();
+    add.setAttribute('aria-expanded','false');
+    add.focus();
   }
   actions.addEventListener('keydown',event=>{
     if (event.key==='Escape' && !event.defaultPrevented) closeAction();
   });
-  add.addEventListener('click',()=>toggleAction(add,()=>renderProductEditor(actions,null)));
-  receive.addEventListener('click',()=>toggleAction(receive,()=>{
-    actions.innerHTML=`<section class="frame"><div class="actions"><h2>Receive stock</h2>
-      <button type="button" class="button secondary" data-close-inventory>Close</button></div><form class="formgrid">
-      ${field('sku','SKU','','text','required')}${field('quantity','Units','','number','min="1" required')}
-      ${field('unit_cost','Unit cost','','number','min="0" step="0.01"')}
-      ${field('received_on','Date received or made',meta.today,'date')}${text('note','Receipt note')}
-      <div class="span">${button('Receive stock')}</div></form></section>`;
-    formHandler($('form',actions),async(data,form)=>{
-      await api('/api/staff/receipts',data);
-      notify('Stock received.');
-      if (actions.contains(form)) {
-        await renderInventoryPage(body,params);
-        $('#receive-stock',body).focus();
-      }
-    });
-  }));
+  add.addEventListener('click',()=>{
+    if (add.getAttribute('aria-expanded')==='true') return closeAction();
+    add.setAttribute('aria-expanded','true');
+    renderProductEditor(actions,null);
+    $('[data-close-inventory]',actions).addEventListener('click',closeAction);
+    $('input',actions).focus();
+  });
   const content=$('#inventory-page',body);
   if (view==='upload') return renderImport(content);
   if (view==='categories') return renderCategories(content);
@@ -326,31 +302,74 @@ function itemFields(item={},existing=false) {
   return `${field('sku','SKU',item.sku??'','text',existing?'readonly':'placeholder="Assign automatically if blank"')}
     ${field('name','Product name',item.name,'text','required')}
     <label>Product type<select name="type_id">${options('type',item.type_id,'Select type')}</select></label>
-    ${field('price','Regular selling price',item.price,'number','min="0" step="0.01"')}
-    ${field('sale_price','Sale price',item.sale_price,'number','min="0" step="0.01"')}
-    <label class="check"><input name="discount" type="checkbox" ${item.discount?'checked':''}>Use sale price on storefront</label>
+    ${field('price','Selling price',item.price,'number','min="0" step="0.01"')}
     ${text('description','Description',item.description)}${audienceInputs(item.categories??[])}
     <div class="span">${field('themes','Product themes',item.themes,'text','placeholder="Animal mugs, woodland gifts"')}
     <small>Separate themes with commas. Use the same theme on similar products to compare sales across SKUs.</small></div>`;
 }
 function normalizeItem(data,form) {
   data.categories=new FormData(form).getAll('category');
-  data.discount=form.elements.discount.checked;
   return data;
+}
+function productPhotoPicker(form) {
+  const input=form.elements.files;
+  const list=$('[data-photo-queue]',form);
+  const queued=new Map();
+  function show() {
+    list.replaceChildren();
+    for (const [key,entry] of queued) {
+      const row=document.createElement('li');
+      const name=document.createElement('span');
+      name.textContent=entry.file.name;
+      const remove=document.createElement('button');
+      remove.type='button';
+      remove.className='button secondary';
+      remove.textContent='Remove';
+      remove.setAttribute('aria-label','Remove '+entry.file.name);
+      remove.addEventListener('click',()=>{queued.delete(key);show();input.focus();});
+      row.append(name,remove);
+      list.append(row);
+    }
+  }
+  input.addEventListener('change',()=>{
+    for (const file of input.files) {
+      const key=JSON.stringify([file.name,file.size,file.lastModified,file.type]);
+      if (queued.has(key)) continue;
+      if (queued.size>=16) {notify('You can add up to 16 photos per save. Save the item to add more later.');break;}
+      queued.set(key,{file,upload:null});
+    }
+    input.value='';
+    show();
+  });
+  return ()=>Promise.all([...queued.values()].map(entry=>{
+    entry.upload??=upload(entry.file).catch(error=>{entry.upload=null;throw error;});
+    return entry.upload;
+  }));
 }
 function renderProductEditor(target,item) {
   target.innerHTML=`<div class="frame"><div class="actions"><h3>${item?'Edit item':'Add item'}</h3>
     ${item?'':'<button type="button" class="button secondary" data-close-inventory>Close</button>'}</div>
     <form id="product-form" class="formgrid">
-    ${itemFields(item?{...item,price:amount(item.price),sale_price:amount(item.sale_price),categories:list(item.categories)}:{},!!item)}
+    ${itemFields(item?{...item,price:amount(item.price),categories:list(item.categories)}:{},!!item)}
     <label>Listing status<select name="state">${['draft','active','archived'].map(state=>option(state,state,item?.state)).join('')}</select></label>
-    ${photoField()}${item?.photos?.length?`<fieldset class="span"><legend>Current photos</legend><div class="photo-row">${item.photos.map((photo,index)=>
+    ${!item?.has_stock_history?`${field('quantity','Starting quantity','','number',`min="1" step="1" ${item?'':'required'}`)}
+    ${field('unit_cost','Cost per unit','','number',`min="0" step="0.01" ${item?'':'required'}`)}
+    ${field('received_on','Date received',meta.today,'date')}`:''}
+    ${photoField()}<div class="span"><small>Choose photos in one or more selections. You can add more in Edit item after saving.</small>
+      <ul class="photo-queue" data-photo-queue aria-live="polite"></ul></div>${item?.photos?.length?`<fieldset class="span"><legend>Current photos</legend><div class="photo-row">${item.photos.map((photo,index)=>
     `<div>${img(photo.id,'Photo '+(index+1),'issue-img')}<label>Order<input data-order="${photo.id}" type="number" min="1" value="${index+1}"></label><label><input name="remove" type="checkbox" value="${photo.id}">Remove</label></div>`).join('')}</div></fieldset>`:''}
     <div class="span">${button('Save item')}</div></form></div>`;
-  formHandler($('#product-form',target),async(data,form)=>{
+  const form=$('#product-form',target);
+  const uploadPhotos=productPhotoPicker(form);
+  formHandler(form,async(data,form)=>{
     normalizeItem(data,form);
+    if (data.state==='active' && data.price==='') throw new Error('Enter a selling price before publishing.');
+    if (data.state==='active' && item?.state!=='active' && !(Number(data.quantity)>0 || item?.on_hand>0)) {
+      throw new Error('Enter a starting quantity before publishing.');
+    }
+    if (Number(data.quantity)>0 && data.unit_cost==='') throw new Error('Enter the cost per unit.');
     data.existing_sku=item?.sku;
-    data.photos=await selectedPhotos(form);
+    data.photos=await uploadPhotos();
     data.photo_order=$$('[data-order]',form).sort((a,b)=>Number(a.value)-Number(b.value)).map(field=>field.dataset.order);
     data.remove_photos=new FormData(form).getAll('remove');
     const result=await api('/api/staff/product',data);
@@ -365,6 +384,7 @@ async function renderStaffProduct(body,sku) {
   const contact=staff.staff_whatsapp?waLink(staff.staff_whatsapp,`Question about ${item.name} (${sku}). ${location.origin}/staff?sku=${encodeURIComponent(sku)}`):'';
   body.innerHTML=`<a class="small" href="/staff?tab=Inventory">← Inventory</a><div class="detail">${gallery(item)}
     <section><h2>${esc(item.name)}</h2><p>${badge(item.sku)} ${badge(`${Math.max(item.available,0)} available`)}</p>
+    <p><strong>${esc(price(item.display_price))}</strong>${item.discount?' · Clearance':''}</p>
     ${item.description?`<p>${esc(item.description)}</p>`:''}${contact?`<a target="_blank" rel="noopener" class="button secondary" href="${esc(contact)}">Message inventory manager ↗</a>`:''}
     ${item.available>0?`<div class="frame"><h3>Record a sale</h3><form id="sell" class="formgrid">
     ${field('quantity','Units',1,'number',`min="1" max="${item.available}" required`)}
@@ -373,16 +393,14 @@ async function renderStaffProduct(body,sku) {
     ${manager?customerPicker():''}
     <div class="span controls">${button('Submit for review')}${manager?'<button class="button secondary" value="direct">Approve now</button>':''}</div></form></div>`:''}
     <details class="frame"><summary>Report a damaged item</summary><form id="issue" class="formgrid">${text('note','What happened?')}${photoField(false)}
-    <div class="span">${button('Send report')}</div></form></details></section></div>
-    ${manager?`<div id="product-editor"></div><div class="frame"><h3>Receive stock</h3><form id="receive" class="formgrid">
-    ${field('quantity','Units','','number','min="1" required')}${field('unit_cost','Unit cost','','number','min="0" step="0.01"')}
-    ${field('received_on','Date received or made',meta.today,'date')}${text('note','Receipt note')}
-    <div class="span">${button('Receive stock')}</div></form></div>
-    <div class="frame"><h3>Stock batches</h3>${table(['Received','On hand','Unit cost'],item.batches.map(b=>[b.received_on??'Unknown',b.on_hand,price(b.cost)]))}
-    ${item.batches.length?`<form id="adjust" class="formgrid"><label>Batch<select name="batch">${item.batches.map(batch=>option(batch.id,`${batch.received_on??'Unknown date'} · ${batch.on_hand} on hand`)).join('')}</select></label>
-    <label>Change<select name="direction"><option value="remove">Remove units</option><option value="add">Add units</option></select></label>
-    ${field('quantity','Units','','number','min="1" required')}${text('note','Reason')}
-    <div class="span">${button('Record adjustment')}</div></form>`:''}</div>`:''}`;
+    <div class="span">${button('Send report')}</div></form></details>
+    ${manager?`<details class="frame"><summary>Edit item</summary><div id="product-editor"></div></details>
+      <details class="frame"><summary>${item.discount?'Manage clearance':'Put on clearance'}</summary>
+      <form id="clearance" class="formgrid"><p class="span small">Selling price ${esc(price(item.price))}.</p>
+      ${field('clearance_price','Clearance price',item.discount?amount(item.sale_price):'','number','min="0" step="0.01" required')}
+      <div class="span controls">${button('Save clearance price')}
+      ${item.discount?'<button type="submit" class="button secondary" value="end" formnovalidate>End clearance</button>':''}</div></form></details>`:''}
+    </section></div>`;
   wireGallery(item);
   const reload=()=>loadTab('Inventory',item.sku);
   if (manager && $('#sell')) wireCustomerPicker($('#sell'));
@@ -397,8 +415,12 @@ async function renderStaffProduct(body,sku) {
   });
   if (manager) {
     renderProductEditor($('#product-editor'),item);
-    formHandler($('#receive'),async data=>{await api('/api/staff/receipts',{...data,sku:item.sku});notify('Stock received.');await reload();});
-    if ($('#adjust')) formHandler($('#adjust'),async data=>{await api('/api/staff/adjustments',data);notify('Stock adjusted.');await reload();});
+    formHandler($('#clearance'),async(data,_,submit)=>{
+      const remove=submit?.value==='end';
+      await api('/api/staff/product/'+encodeURIComponent(item.sku)+'/clearance',{...data,remove});
+      notify(remove?'Clearance ended.':'Clearance price saved.');
+      await reload();
+    });
   }
 }
 function table(headers,rows) {
@@ -579,8 +601,8 @@ async function renderCustomers(body,id) {
     return displayOrders($('[data-orders]',body),customer.id);
   }
   body.innerHTML=workspaceHeading('Customers')+`
-    <form class="formgrid" id="customer-search">${field('q','Search customers','','search','placeholder="Name, phone, or email"')}
-      <div>${button('Search','secondary')}</div></form>
+    <form class="filter-grid customer-search" id="customer-search">${field('q','Search by name, phone, or email','','search','placeholder="Search customers"')}
+      <div class="form-action">${button('Search','secondary')}</div></form>
     <details class="frame"><summary>Add a customer</summary><form class="formgrid" id="customer-create">
       ${field('name','Name','','text','required')}${field('phone','Phone','','tel')}${field('email','Email','','email')}
       <div class="span">${button('Save customer')}</div></form></details><div data-results></div>`;
@@ -740,10 +762,10 @@ async function showDrafts() {
        ${exists?badge('Existing SKU',true):''}</summary>
        <div class="photo-row">${(item.photos||[]).map(photo=>img(photo,'Draft photo','issue-img')).join('')}</div>
        <form class="formgrid" data-draft="${row.id}">${itemFields(item,!!item.sku)}
-       ${field('quantity','Opening or incoming units',item.quantity,'number','min="0"')}
+       ${field('quantity','Starting quantity',item.quantity,'number','min="0"')}
        ${field('unit_cost','Unit cost',item.unit_cost,'number','min="0" step="0.01"')}
        ${field('received_on','Date received',item.received_on,'date')}
-       <label>Action<select name="action">${exists?'<option value="">Choose an action</option><option value="update">Update listing details</option><option value="receive">Receive additional stock only</option>':'<option value="create">Create item</option>'}</select></label>
+       <label>Action<select name="action">${exists?'<option value="">Choose an action</option><option value="update">Update listing details</option>':'<option value="create">Create item</option>'}</select></label>
        <label class="check"><input type="checkbox" name="publish">Publish listing</label><div class="span">${button('Approve this row')}</div>
        </form></details>`;
   };
@@ -760,7 +782,7 @@ async function showDrafts() {
   }));
   $('#approve-batch',target)?.addEventListener('click',async event=>{
     const button=event.currentTarget;
-    const ready=drafts.filter(row=>!row.existing_sku&&row.payload.name&&row.payload.price!==''&&row.payload.price!=null&&Number(row.payload.quantity)>0);
+    const ready=drafts.filter(row=>!row.existing_sku&&row.payload.name&&row.payload.price!==''&&row.payload.price!=null&&Number(row.payload.quantity)>0 && row.payload.unit_cost!=null && row.payload.unit_cost!=='');
     if (!ready.length) return notify('No complete new drafts are ready for batch approval.');
     if (!confirm(`Add stock and publish ${ready.length} new items?`)) return;
     button.disabled=true;
