@@ -6,6 +6,9 @@ let meta;
 let staff;
 let activeTab;
 let timer;
+const workspaceViewKey = 'luxor-workspace-view';
+const wantsStaffPreview = () => location.pathname==='/staff' && sessionStorage.getItem(workspaceViewKey)==='staff';
+const staffPreview = wantsStaffPreview();
 const $ = (query,scope=document) => scope.querySelector(query);
 const $$ = (query,scope=document) => [...scope.querySelectorAll(query)];
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -15,7 +18,7 @@ const option = (value,label,selected) => `<option value="${esc(value)}"${String(
 const options = (kind,selected,first) => option('',first,selected)+meta.categories.filter(row=>row.kind===kind).map(row=>option(row.id,row.name,selected)).join('');
 const list = (value,separator=',') => String(value??'').split(separator).filter(Boolean);
 const badge = (text,pending=false) => `<span class="badge${pending?' pending':''}">${esc(text)}</span>`;
-const img = (asset,alt,cls='photo') => `<img class="${cls}" src="/api/photo/${esc(asset)}" alt="${esc(alt)}" loading="lazy">`;
+const img = (asset,alt,cls='photo') => `<img class="${cls}" src="/api/photo/${esc(asset)}${staffPreview?'?view=staff':''}" alt="${esc(alt)}" loading="lazy">`;
 const blank = name => `<div class="placeholder" aria-hidden="true">${esc(name?.slice(0,2).toUpperCase() || 'LM')}</div>`;
 const empty = message => `<div class="empty">${esc(message)}</div>`;
 const button = (label,extra='') => `<button class="button ${extra}">${esc(label)}</button>`;
@@ -35,8 +38,9 @@ function notify(message) {
 }
 async function api(path, data) {
   const body = data instanceof FormData ? data : data === undefined ? undefined : JSON.stringify(data);
-  const response = await fetch(path,{method:data===undefined?'GET':'POST',body,
-    headers:body && !(data instanceof FormData)?{'Content-Type':'application/json'}:{}});
+  const headers=body && !(data instanceof FormData)?{'Content-Type':'application/json'}:{};
+  if (staffPreview && path.startsWith('/api/staff/')) headers['X-Workspace-View']='staff';
+  const response = await fetch(path,{method:data===undefined?'GET':'POST',body,headers});
   const result = await response.json().catch(()=>({}));
   if (!response.ok) throw Object.assign(new Error(result.error ?? result.message ?? 'The request could not be completed.'),{status:response.status});
   return result;
@@ -190,9 +194,19 @@ const managerSections = [['Overview','▦'],['Orders','▤'],['Customers','◇']
 const homepageLabels={featured:'Featured',arrivals:'Just In',clearance:'Last Chance'};
 let attentionRevision=0;
 
+function switchWorkspaceView(view) {
+  if (view==='staff') sessionStorage.setItem(workspaceViewKey,'staff');
+  else sessionStorage.removeItem(workspaceViewKey);
+  location.assign(staffLink(view==='staff'?'Inventory':'Team'));
+}
+
 async function openStaff() {
   try { staff=await api('/api/staff/me'); }
-  catch (error) { if (error.status===401) return signIn(); throw error; }
+  catch (error) {
+    if (error.status!==401) throw error;
+    sessionStorage.removeItem(workspaceViewKey);
+    return signIn();
+  }
   const manager=staff.role==='manager';
   const params=new URLSearchParams(location.search);
   const sku=params.get('sku');
@@ -221,12 +235,20 @@ async function openStaff() {
         <div class="controls"><a href="/">View storefront</a><button class="button secondary" id="signout">Sign out</button></div>
       </div>
     </aside>
-    <div class="workspace-content">${manager?'<div id="homepage-alerts" role="status" hidden></div>':''}<div id="staffbody"></div></div></div>`;
+    <div class="workspace-content">${manager?'<div id="homepage-alerts" role="status" hidden></div>':''}
+      ${staff.previewing_staff?`<div class="workspace-preview actions">
+        <p><strong>Staff preview</strong> · Sales and damage reports are saved to this store under your account.</p>
+        <button type="button" class="button secondary" id="exit-staff-preview">Return to admin view</button>
+      </div>`:''}<div id="staffbody"></div></div></div>`;
   $('#workspace-menu').addEventListener('click',event=>{
     const open=$('#workspace-sidebar').classList.toggle('open');
     event.currentTarget.setAttribute('aria-expanded',String(open));
   });
-  $('#signout').addEventListener('click',async()=>{try { await api('/api/auth/sign-out',{}); location.assign('/staff'); } catch(error){notify(error.message);} });
+  $('#exit-staff-preview')?.addEventListener('click',()=>switchWorkspaceView('admin'));
+  $('#signout').addEventListener('click',async()=>{
+    try { await api('/api/auth/sign-out',{}); sessionStorage.removeItem(workspaceViewKey); location.assign('/staff'); }
+    catch(error){notify(error.message);}
+  });
   if (manager) refreshWorkspaceAttention();
   await loadTab(activeTab,sku,params);
 }
@@ -972,11 +994,24 @@ function renderCategories(body) {
 }
 async function renderTeam(body) {
   const people=await api('/api/staff/team');
-  body.innerHTML=workspaceHeading('Team')+`<div class="frame"><h3>Invite an employee</h3><form class="formgrid" id="invite">
+  body.innerHTML=workspaceHeading('Team')+`<div class="frame">
+    <h3>Preview the workspace</h3>
+    <p class="small" id="workspace-view-help">Open the staff view using your admin sign-in.</p>
+    <div class="controls workspace-view-controls">
+      <label>View as<select id="workspace-view" aria-describedby="workspace-view-help">
+        <option value="admin">Admin</option><option value="staff">Staff</option>
+      </select></label>
+      <button type="button" class="button secondary" id="open-workspace-view" disabled>Switch view</button>
+    </div>
+  </div><div class="frame"><h3>Invite an employee</h3><form class="formgrid" id="invite">
     ${field('email','Email address','','email','required')}<div class="form-action">${button('Send invitation')}</div></form>
     ${people.map(person=>`<div class="actions frame"><div>${esc(person.email)} <span class="small">${esc(person.role)} · ${person.active?'Access enabled':'Access revoked'}</span></div>
     ${person.role==='employee'?`<div class="controls"><button class="button secondary" data-invite="${esc(person.email)}">${person.active?'Resend invite':'Restore and invite'}</button>
     ${person.active?`<button class="button danger" data-revoke="${esc(person.email)}">Revoke access</button>`:''}</div>`:''}</div>`).join('')}</div>`;
+  const view=$('#workspace-view',body);
+  const applyView=$('#open-workspace-view',body);
+  view.addEventListener('change',()=>{ applyView.disabled=view.value!=='staff'; });
+  applyView.addEventListener('click',()=>switchWorkspaceView(view.value));
   async function change(email,disable=false) {
     try { await api('/api/staff/team',{email,disable});notify(disable?'Access revoked.':'Invitation sent.'); }
     catch(error){notify(error.message);}
@@ -1410,4 +1445,7 @@ async function boot() {
   }
 }
 window.addEventListener('popstate',()=>boot());
+window.addEventListener('pageshow',event=>{
+  if (event.persisted && staffPreview!==wantsStaffPreview()) location.reload();
+});
 boot();

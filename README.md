@@ -13,7 +13,7 @@ npm run db:local
 npm run dev
 ```
 
-Open the local URL printed by Wrangler. Choose **Staff workspace**, enter the bootstrap email from `.dev.vars`, and use the one-time link printed by the local dev server. Under **Team**, invite an employee by email and use a separate browser or private window to test as that employee. Local email links are printed only when enabled on a loopback hostname.
+Open the local URL printed by Wrangler. Choose **Staff workspace**, enter the bootstrap email from `.dev.vars`, and use the one-time link printed by the local dev server. In **Team**, select **View as → Staff** and click **Switch view** to use the staff workspace with your admin sign-in. **Return to admin view** takes you back to Team. Submissions in staff preview use the current store's data and are attributed to your admin account. Local email links are printed only when enabled on a loopback hostname.
 
 ```bash
 npm run check

@@ -27,6 +27,11 @@ function access(env) {
 const audit = (db, user, action, target, details = null) => db.sql(
   'INSERT INTO audit(actor,action,target,details) VALUES(?,?,?,?)',user.id,action,target,details);
 function requireManager(user) { assert(user?.role === 'manager','Manager access required.',403); }
+function staffView(user, view) {
+  return view === 'staff' && user?.role === 'manager'
+    ? {...user,role:'employee',previewing_staff:true}
+    : user;
+}
 function transactionDay(input, today, fallback = today) {
   const day = date(input ?? fallback);
   assert(day <= today,'The date cannot be in the future.');
@@ -386,11 +391,11 @@ async function api(request,env,db,url) {
   if (photo && method === 'GET') {
     const photoAuth = authEnabled && request.headers.get('Cookie') ? buildAuth(env,db,url.origin) : null;
     const user = photoAuth ? await staffSession(request,photoAuth,db) : null;
-    return getPhoto(env,db,user,photo[1]);
+    return getPhoto(env,db,staffView(user,url.searchParams.get('view')),photo[1]);
   }
   if (!path.startsWith('/api/staff/')) throw new HttpError(404,'Page not found.');
   assert(auth,'Staff sign-in is not configured.',503);
-  const user = await staffSession(request,auth,db);
+  const user = staffView(await staffSession(request,auth,db),request.headers.get('X-Workspace-View'));
   assert(user,'Sign in to open the staff workspace.',401);
   if (path === '/api/staff/me' && method === 'GET') return json({...user,staff_whatsapp:env.STAFF_WHATSAPP || ''});
   if (path === '/api/staff/catalog' && method === 'GET') return json(await catalog(db,url,user));
