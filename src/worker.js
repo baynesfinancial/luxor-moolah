@@ -416,7 +416,11 @@ async function api(request,env,db,url) {
   assert(auth,'Staff sign-in is not configured.',503);
   const user = staffView(await staffSession(request,auth,db),request.headers.get('X-Workspace-View'));
   assert(user,'Sign in to open the staff workspace.',401);
-  if (path === '/api/staff/me' && method === 'GET') return json({...user,staff_whatsapp:env.STAFF_WHATSAPP || ''});
+  const ownerEmail = env.BOOTSTRAP_EMAIL?.trim().toLowerCase();
+  const canManageAdmins = user.role==='manager' && user.email===ownerEmail;
+  if (path === '/api/staff/me' && method === 'GET') {
+    return json({...user,can_manage_admins:canManageAdmins,staff_whatsapp:env.STAFF_WHATSAPP || ''});
+  }
   if (path === '/api/staff/catalog' && method === 'GET') return json(await catalog(db,url,user));
   if (path === '/api/staff/recent' && method === 'GET') return json(await db.all(
     'SELECT p.sku,p.name FROM recent r JOIN products p ON p.sku=r.sku WHERE r.user_id=? AND p.state=\'active\' ORDER BY r.seen_at DESC LIMIT 8',user.id));
@@ -519,7 +523,8 @@ async function api(request,env,db,url) {
     return json({items:items.slice(0,size),counts,page,next:items.length>size});
   }
   if (path === '/api/staff/team' && method === 'GET') {
-    return json(await db.all('SELECT email,role,active FROM users ORDER BY role DESC,email'));
+    const people=await db.all('SELECT email,role,active FROM users ORDER BY role DESC,email');
+    return json(people.map(person=>({...person,owner:person.role==='manager' && person.email===ownerEmail})));
   }
   if (path === '/api/staff/imports' && method === 'GET') {
     const imports = await db.all(`SELECT i.id,i.payload,i.created_at,i.approved_at,p.sku AS existing_sku FROM import_rows i LEFT JOIN products p ON p.sku=json_extract(i.payload,'$.sku') WHERE i.approved_at IS NULL ORDER BY i.created_at DESC LIMIT 500`);
@@ -540,16 +545,27 @@ async function api(request,env,db,url) {
   }
   if (path === '/api/staff/team') {
     const email = emailOf(input.email);
-    assert(email !== user.email,'Your own access is managed by the account setup.');
+    assert(email !== user.email,'You cannot change your own access.');
+    assert(email !== ownerEmail,'The primary administrator’s access is managed by the account setup.',403);
     const existing = await db.one('SELECT role FROM users WHERE email=?',email);
-    assert(existing?.role !== 'manager','The administrator account cannot be changed here.');
-    await db.batch([db.sql(`INSERT INTO users(id,email,role,active) VALUES(?,?,'employee',?)
-      ON CONFLICT(email) DO UPDATE SET active=excluded.active`,id(),email,input.disable ? 0 : 1),
-      audit(db,user,input.disable?'team.revoke':'team.invite',email)]);
-    if (input.disable) {
-      await db.run('DELETE FROM "session" WHERE userId IN (SELECT id FROM "user" WHERE email=?)',email);
-      return json({});
-    }
+    const disable = input.disable===true;
+    const role = input.role ?? existing?.role ?? 'employee';
+    assert(['employee','manager'].includes(role),'Choose an access role.');
+    assert((role!=='manager' && existing?.role!=='manager') || canManageAdmins,'Only the primary administrator can manage admin access.',403);
+    assert(existing?.role!=='manager' || role==='manager','Choose Admin to resend an administrator’s invitation.',409);
+    assert(!disable || existing,'Team member not found.',404);
+    const write=existing
+      ? db.sql('UPDATE users SET role=?,active=? WHERE email=? AND role=?',disable?existing.role:role,disable?0:1,email,existing.role)
+      : db.sql('INSERT OR IGNORE INTO users(id,email,role,active) VALUES(?,?,?,1)',id(),email,role);
+    const [result]=await db.batch([write,
+      db.sql(`INSERT INTO audit(actor,action,target,details) SELECT ?,?,?,? WHERE changes()>0`,
+        user.id,disable?'team.revoke':'team.invite',email,role),
+      ...(disable||existing && existing.role!==role ? [
+        db.sql('DELETE FROM "session" WHERE userId IN (SELECT id FROM "user" WHERE email=?)',email)
+      ] : [])
+    ]);
+    assert(result.meta.changes,'Team access changed. Refresh and try again.',409);
+    if (disable) return json({});
     try {
       await auth.api.signInMagicLink({headers:request.headers,body:{email,callbackURL:'/staff'}});
       return json({sent:true});

@@ -1042,6 +1042,7 @@ function renderCategories(body) {
 }
 async function renderTeam(body) {
   const people=await api('/api/staff/team');
+  const canManageAdmins=staff.can_manage_admins;
   body.innerHTML=workspaceHeading('Team')+`<div class="frame">
     <h3>Preview the workspace</h3>
     <p class="small" id="workspace-view-help">Open the staff view using your admin sign-in.</p>
@@ -1051,21 +1052,27 @@ async function renderTeam(body) {
       </select></label>
       <button type="button" class="button secondary" id="open-workspace-view" disabled>Switch view</button>
     </div>
-  </div><div class="frame"><h3>Invite an employee</h3><form class="formgrid" id="invite">
-    ${field('email','Email address','','email','required')}<div class="form-action">${button('Send invitation')}</div></form>
-    ${people.map(person=>`<div class="actions frame"><div>${esc(person.email)} <span class="small">${esc(person.role)} · ${person.active?'Access enabled':'Access revoked'}</span></div>
-    ${person.role==='employee'?`<div class="controls"><button class="button secondary" data-invite="${esc(person.email)}">${person.active?'Resend invite':'Restore and invite'}</button>
+  </div><div class="frame"><h3>Invite a team member</h3>
+    <p class="small">Team members sign in with a one-time email link.</p><form class="formgrid" id="invite">
+    ${field('email','Email address','','email','required')}
+    ${canManageAdmins?'<label>Access role<select name="role"><option value="employee">Staff</option><option value="manager">Admin</option></select></label>':''}
+    <div class="form-action">${button('Send invitation')}</div></form>
+    ${people.map(person=>`<div class="actions frame"><div>${esc(person.email)} <span class="small">${person.owner?'Primary admin':person.role==='manager'?'Admin':'Staff'} · ${person.active?'Access enabled':'Access revoked'}</span></div>
+    ${person.email!==staff.email && !person.owner && (person.role==='employee'||canManageAdmins)?`<div class="controls"><button class="button secondary" data-invite="${esc(person.email)}">${person.active?'Resend invite':'Restore and invite'}</button>
     ${person.active?`<button class="button danger" data-revoke="${esc(person.email)}">Revoke access</button>`:''}</div>`:''}</div>`).join('')}</div>`;
   const view=$('#workspace-view',body);
   const applyView=$('#open-workspace-view',body);
   view.addEventListener('change',()=>{ applyView.disabled=view.value!=='staff'; });
   applyView.addEventListener('click',()=>switchWorkspaceView(view.value));
-  async function change(email,disable=false) {
-    try { await api('/api/staff/team',{email,disable});notify(disable?'Access revoked.':'Invitation sent.'); }
+  async function change(email,disable=false,role) {
+    try { await api('/api/staff/team',{email,disable,role});notify(disable?'Access revoked.':'Invitation sent.'); }
     catch(error){notify(error.message);}
     await renderTeam(body);
   }
-  formHandler($('#invite'),data=>change(data.email));
+  formHandler($('#invite'),data=>{
+    if (data.role==='manager' && !confirm(`Grant admin access to ${data.email} and send a sign-in link?`)) return;
+    return change(data.email,false,data.role);
+  });
   $$('[data-invite]',body).forEach(el=>el.addEventListener('click',()=>change(el.dataset.invite)));
   $$('[data-revoke]',body).forEach(el=>el.addEventListener('click',()=>change(el.dataset.revoke,true)));
 }

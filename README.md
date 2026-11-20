@@ -29,7 +29,7 @@ npm run check
    | Setting | What to enter |
    | --- | --- |
    | `BETTER_AUTH_SECRET` | A unique random secret of at least 32 characters for each environment. |
-   | `BOOTSTRAP_EMAIL` | The email of the first and only production administrator. The initial staff sign-in request seeds this account. Changing the variable later does not create another administrator. |
+   | `BOOTSTRAP_EMAIL` | The primary administrator’s email. The initial staff sign-in request seeds this account. The primary administrator can invite or manage additional admins from Team. Changing the variable later does not create another administrator. |
    | `RESEND_API_KEY` | Email provider key for invitations and one-time sign-in links. |
    | `MAIL_FROM` | A verified sender for the Resend account. |
    | `STAFF_WHATSAPP` | Optional manager WhatsApp number, with country code. Employee item links use this number. |
