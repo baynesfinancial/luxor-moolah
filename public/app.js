@@ -154,7 +154,7 @@ async function openStaff() {
   const manager=staff.role==='manager';
   const params=new URLSearchParams(location.search);
   const sku=params.get('sku');
-  const tabs=manager?['Dashboard','Inventory','Sales','Damage reports','CSV upload','Categories','Team']:['Inventory','My sales'];
+  const tabs=manager?['Dashboard','Inventory','Sales','Orders','Customers','Damage reports','CSV upload','Categories','Team']:['Inventory','My sales'];
   activeTab=tabs.includes(params.get('tab'))?params.get('tab'):sku?'Inventory':tabs[0];
   main.innerHTML=`<div class="shell section"><div class="sectionhead"><div><h2>${manager?'Manager dashboard':'Staff workspace'}</h2>
     <span class="small">${esc(staff.email)}</span></div><button class="button secondary" id="signout">Sign out</button></div>
@@ -178,6 +178,8 @@ async function loadTab(tab,sku=null) {
       return await renderStaffInventory(body);
     }
     if (tab==='Sales'||tab==='My sales') return await renderSales(body);
+    if (tab==='Orders') return await renderOrders(body,new URLSearchParams(location.search).get('order'));
+    if (tab==='Customers') return await renderCustomers(body,new URLSearchParams(location.search).get('customer'));
     if (tab==='Damage reports') return await renderIssues(body);
     if (tab==='CSV upload') return await renderImport(body);
     if (tab==='Categories') return renderCategories(body);
@@ -240,6 +242,7 @@ async function renderStaffProduct(body,sku) {
     ${field('quantity','Units',1,'number',`min="1" max="${item.available}" required`)}
     ${field('sold_on','Sale date',meta.today,'date','required')}
     ${manager?field('unit_price','Actual price per unit',amount(item.display_price),'number','min="0" step="0.01"'):''}
+    ${manager?customerPicker():''}
     <div class="span controls">${button('Submit for review')}${manager?'<button class="button secondary" value="direct">Approve now</button>':''}</div></form></div>`:''}
     <details class="frame"><summary>Report a damaged item</summary><form id="issue" class="formgrid">${text('note','What happened?')}${photoField(false)}
     <div class="span">${button('Send report')}</div></form></details></section></div>
@@ -254,6 +257,7 @@ async function renderStaffProduct(body,sku) {
     <div class="span">${button('Record adjustment')}</div></form>`:''}</div>`:''}`;
   wireGallery(item);
   const reload=()=>loadTab('Inventory',item.sku);
+  if (manager && $('#sell')) wireCustomerPicker($('#sell'));
   if ($('#sell')) formHandler($('#sell'),async(data,form,submit)=>{
     await api('/api/staff/sales',{...data,sku:item.sku,direct:submit?.value==='direct'});
     notify(submit?.value==='direct'?'Sale approved.':'Sale submitted.');
@@ -276,14 +280,25 @@ function table(headers,rows) {
 async function renderSales(body) {
   const sales=await api('/api/staff/sales');
   const manager=staff.role==='manager';
-  body.innerHTML=`<h3>${manager?'Sale approvals':'My sales'}</h3>${sales.length?sales.map(sale=>
+  const pendingCount=sales.filter(sale=>sale.status==='pending').length;
+  body.innerHTML=`<h3>${manager?'Sale approvals':'My sales'}</h3>
+    ${manager && pendingCount>1?`<details class="frame"><summary>Close selected items as one order</summary>
+      <p class="small">Select the pending items below and enter each selling price. Use the same sale date for all items.</p>
+      <form id="close-order" class="formgrid">${customerPicker()}
+        <div class="span">${button('Approve selected items as one order')}</div></form></details>`:''}
+    ${sales.length?sales.map(sale=>
     `<details class="frame" ${sale.status==='pending'?'open':''}><summary>${esc(sale.name)} · ${sale.quantity} · ${esc(sale.sold_on)} · ${badge(sale.returned>=sale.quantity?'Returned':sale.returned>0?'Partially returned':sale.status,sale.status==='pending')}</summary>
       ${manager?`<p class="small">${esc(sale.employee)} · submitted ${esc(sale.submitted_at)}</p>`:''}
+      ${manager && sale.order_id?`<p class="small">${esc(sale.customer_name||'Walk-in')} · <a href="${orderLink(sale.order_id)}">View order</a></p>`:''}
+      ${manager && sale.status==='approved' && !sale.order_id?`<details><summary>Attach a customer</summary>
+        <form class="formgrid" data-assign="${sale.id}">${customerPicker()}<div class="span">${button('Save customer','secondary')}</div></form></details>`:''}
       ${sale.notes.map(note=>`<p>${esc(note.note)}</p>`).join('')}
       ${sale.status==='pending'?(manager?`<form data-review="${sale.id}" class="formgrid">
         ${field('sku','SKU',sale.sku,'text','required')}${field('quantity','Units',sale.quantity,'number','min="1" required')}
         ${field('sold_on','Sale date',sale.sold_on,'date','required')}${field('unit_price','Actual price per unit',amount(sale.unit_price),'number','min="0" step="0.01"')}
-        ${text('note','Review note')}<div class="span controls"><button class="button" value="approved">Approve</button>
+        ${text('note','Review note')}${customerPicker()}
+        ${pendingCount>1?'<label class="check span"><input type="checkbox" name="group">Include in selected order</label>':''}
+        <div class="span controls"><button class="button" value="approved">Approve</button>
         <button class="button secondary" value="pending">Save correction</button><button class="button danger" value="canceled">Cancel sale</button></div></form>`:
         `<form data-note="${sale.id}" class="formgrid">${text('note','Correction note')}<div class="span">${button('Send note')}</div></form>`):
         manager && sale.status==='approved' && sale.returned<sale.quantity ? `<form data-return="${sale.id}" class="formgrid">
@@ -292,16 +307,180 @@ async function renderSales(body) {
           ${field('refund','Total refund','','number','min="0" step="0.01" placeholder="Defaults to original unit price"')}
           ${text('note','Return reason')}<div class="span">${button('Record return','secondary')}</div></form>`:''}
     </details>`).join(''):empty('No sales recorded yet.')}`;
-  $$('[data-review]',body).forEach(form=>formHandler(form,async(data,_,submit)=>{
-    await api(`/api/staff/sales/${form.dataset.review}/review`,{...data,status:submit.value});
-    notify('Sale updated.'); await renderSales(body);
-  }));
+  $$('[data-review]',body).forEach(form=>{
+    wireCustomerPicker(form);
+    formHandler(form,async(data,_,submit)=>{
+      await api(`/api/staff/sales/${form.dataset.review}/review`,{...data,status:submit.value});
+      notify('Sale updated.'); await renderSales(body);
+    });
+  });
+  $$('[data-assign]',body).forEach(form=>{
+    wireCustomerPicker(form);
+    formHandler(form,async data=>{
+      if (!data.customer_id) throw new Error('Select a customer first.');
+      await api(`/api/staff/sales/${form.dataset.assign}/customer`,data);
+      notify('Customer attached.'); await renderSales(body);
+    });
+  });
+  const group=$('#close-order',body);
+  if (group) {
+    wireCustomerPicker(group);
+    formHandler(group,async data=>{
+      const selected=$$('[data-review]',body).filter(form=>form.elements.group?.checked);
+      if (selected.length<2) throw new Error('Select at least two pending items below.');
+      const items=selected.map(form=>({...format(form),id:form.dataset.review}));
+      if (items.some(item=>item.customer_id && item.customer_id!==data.customer_id))
+        throw new Error('Use the customer picker in the grouped order for all selected items.');
+      const result=await api('/api/staff/orders',{customer_id:data.customer_id,items});
+      notify('Order closed.'); location.assign(orderLink(result.order_id));
+    });
+  }
   $$('[data-note]',body).forEach(form=>formHandler(form,async data=>{
     await api(`/api/staff/sales/${form.dataset.note}/notes`,data); notify('Note sent.'); await renderSales(body);
   }));
   $$('[data-return]',body).forEach(form=>formHandler(form,async data=>{
     await api(`/api/staff/sales/${form.dataset.return}/return`,{...data,restock:!!data.restock}); notify('Return recorded.'); await renderSales(body);
   }));
+}
+const orderLink = id => '/staff?tab=Orders&order='+encodeURIComponent(id);
+const customerLink = id => '/staff?tab=Customers&customer='+encodeURIComponent(id);
+function customerPicker(customer=null) {
+  return `<fieldset class="span" data-picker><legend>Customer (optional)</legend>
+    <input type="hidden" name="customer_id" value="${esc(customer?.id)}">
+    <div class="controls"><span class="small" data-selected aria-live="polite">${esc(customer?.name||'Walk-in')}</span>
+      <button type="button" class="button secondary" data-clear>Use walk-in</button></div>
+    <div class="controls"><label>Find a customer<input type="search" data-search placeholder="Name, phone, or email" autocomplete="off"></label>
+      <button type="button" class="button secondary" data-find>Search</button></div>
+    <div data-matches aria-live="polite"></div>
+    <details><summary>Add a new customer</summary><div class="formgrid">
+      <label>Name<input data-customer-name autocomplete="off"></label>
+      <label>Phone<input data-customer-phone type="tel" autocomplete="off"></label>
+      <label>Email<input data-customer-email type="email" autocomplete="off"></label>
+      <div><button type="button" class="button secondary" data-add-customer>Save and select</button></div>
+    </div></details></fieldset>`;
+}
+function wireCustomerPicker(form) {
+  const picker=$('[data-picker]',form);
+  if (!picker) return;
+  const results=$('[data-matches]',picker);
+  function select(customer) {
+    form.elements.customer_id.value=customer?.id??'';
+    $('[data-selected]',picker).textContent=customer?.name??'Walk-in';
+    results.replaceChildren();
+  }
+  $('[data-clear]',picker).addEventListener('click',()=>select(null));
+  const search=$('[data-search]',picker);
+  async function find() {
+    try {
+      const found=await api('/api/staff/customers?'+new URLSearchParams({q:search.value}));
+      results.replaceChildren();
+      if (!found.items.length) results.textContent='No customers matched.';
+      for (const customer of found.items) {
+        const choice=document.createElement('button');
+        choice.type='button';
+        choice.className='button secondary';
+        choice.textContent=[customer.name,customer.phone,customer.email].filter(Boolean).join(' · ');
+        choice.addEventListener('click',()=>select(customer));
+        results.append(choice);
+      }
+    } catch(error) { notify(error.message); }
+  }
+  $('[data-find]',picker).addEventListener('click',find);
+  search.addEventListener('keydown',event=>{
+    if (event.key==='Enter') { event.preventDefault(); find(); }
+  });
+  $('[data-add-customer]',picker).addEventListener('click',async event=>{
+    const button=event.currentTarget;
+    button.disabled=true;
+    try {
+      const customer=await api('/api/staff/customers',{
+        name:$('[data-customer-name]',picker).value,
+        phone:$('[data-customer-phone]',picker).value,
+        email:$('[data-customer-email]',picker).value
+      });
+      select(customer);
+      button.closest('details').open=false;
+      notify('Customer added and selected.');
+    } catch(error) { notify(error.message); }
+    finally {button.disabled=false;}
+  });
+}
+function paginate(target,result,refresh) {
+  const controls=document.createElement('div');
+  controls.className='controls';
+  for (const [label,page,visible] of [['Previous',result.page-1,result.page>1],['Next',result.page+1,result.next]]) {
+    if (!visible) continue;
+    const button=document.createElement('button');
+    button.type='button';
+    button.className='button secondary';
+    button.textContent=label;
+    button.addEventListener('click',()=>refresh(page).catch(error=>notify(error.message)));
+    controls.append(button);
+  }
+  target.append(controls);
+}
+async function displayOrders(target,customer=null,page=1) {
+  const query=new URLSearchParams({page});
+  if (customer) query.set('customer',customer);
+  const result=await api('/api/staff/orders?'+query);
+  target.innerHTML=result.items.length?result.items.map(order=>`<a class="order-row frame" href="${orderLink(order.id)}">
+    <strong>Order ${esc(order.id.slice(0,8).toUpperCase())}</strong>
+    <span>${esc(order.sold_on)} · ${esc(order.customer_name||'Walk-in')} · ${order.line_count} ${order.line_count===1?'line':'lines'}</span>
+    <span>${esc(price(order.gross-order.refunds))}</span></a>`).join(''):empty('No orders yet.');
+  paginate(target,result,next=>displayOrders(target,customer,next));
+}
+async function renderCustomers(body,id) {
+  if (id) {
+    const customer=await api('/api/staff/customers/'+encodeURIComponent(id));
+    body.innerHTML=`<a href="/staff?tab=Customers">← Customers</a>
+      <section class="frame"><h3>${esc(customer.name)}</h3><p>${esc([customer.phone,customer.email].filter(Boolean).join(' · '))}</p>
+        <h4>Purchase history</h4><div data-orders></div></section>`;
+    return displayOrders($('[data-orders]',body),customer.id);
+  }
+  body.innerHTML=`<h3>Customers</h3>
+    <form class="formgrid" id="customer-search">${field('q','Search customers','','search','placeholder="Name, phone, or email"')}
+      <div>${button('Search','secondary')}</div></form>
+    <details class="frame"><summary>Add a customer</summary><form class="formgrid" id="customer-create">
+      ${field('name','Name','','text','required')}${field('phone','Phone','','tel')}${field('email','Email','','email')}
+      <div class="span">${button('Save customer')}</div></form></details><div data-results></div>`;
+  const target=$('[data-results]',body);
+  const refresh=async(q='',page=1)=>{
+    const result=await api('/api/staff/customers?'+new URLSearchParams({q,page}));
+    target.innerHTML=result.items.length?result.items.map(customer=>`<a class="order-row frame" href="${customerLink(customer.id)}">
+      <strong>${esc(customer.name)}</strong><span>${esc([customer.phone,customer.email].filter(Boolean).join(' · '))}</span></a>`).join(''):empty('No customers matched.');
+    paginate(target,result,next=>refresh(q,next));
+  };
+  formHandler($('#customer-search',body),data=>refresh(data.q));
+  formHandler($('#customer-create',body),async data=>{
+    const customer=await api('/api/staff/customers',data);
+    location.assign(customerLink(customer.id));
+  });
+  await refresh();
+}
+async function renderOrders(body,id) {
+  if (!id) {
+    body.innerHTML='<h3>Orders</h3><div data-orders></div>';
+    return displayOrders($('[data-orders]',body));
+  }
+  const order=await api('/api/staff/orders/'+encodeURIComponent(id));
+  const returns=order.lines.flatMap(line=>line.returns.map(entry=>[line.name,line.sku,entry.returned_on,entry.quantity,price(entry.refund),entry.restock?'Yes':'No']));
+  body.innerHTML=`<div class="controls"><a href="/staff?tab=Orders">← Orders</a>
+    ${order.customer_id?`<a href="${customerLink(order.customer_id)}">Customer history</a>`:''}
+    <button type="button" class="button secondary" data-print>Print order summary</button></div>
+    <section class="frame order-summary"><h3>Order ${esc(order.id.slice(0,8).toUpperCase())}</h3>
+    <p>${esc(order.sold_on)} · ${esc(order.customer_name||'Walk-in')}</p>
+    ${table(['Item','SKU','Units','Unit price','Line total'],order.lines.map(line=>[line.name,line.sku,line.quantity,price(line.unit_price),price(line.unit_price*line.quantity)]))}
+    ${returns.length?`<h4>Returns</h4>${table(['Item','SKU','Date','Units','Refund','Restocked'],returns)}`:''}
+    <p><strong>Gross</strong> ${price(order.gross)} · <strong>Refunds</strong> ${price(order.refunds)} · <strong>Net</strong> ${price(order.gross-order.refunds)}</p></section>
+    <details class="frame"><summary>Change order customer</summary><form class="formgrid" data-customer-change>
+      ${customerPicker({id:order.customer_id,name:order.customer_name})}<div class="span">${button('Save customer','secondary')}</div></form></details>`;
+  $('[data-print]',body).addEventListener('click',()=>window.print());
+  const form=$('[data-customer-change]',body);
+  wireCustomerPicker(form);
+  formHandler(form,async data=>{
+    await api(`/api/staff/sales/${order.lines[0].id}/customer`,data);
+    notify('Order customer updated.'); await renderOrders(body,id);
+  });
 }
 async function renderIssues(body) {
   const issues=await api('/api/staff/issues');

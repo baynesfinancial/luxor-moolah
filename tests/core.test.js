@@ -4,10 +4,11 @@ import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { draftRows, parseCSV } from '../public/csv.js';
 import { date, dayInZone, money, skuOf } from '../src/helpers.js';
+import { createCustomer, listOrders, orderDetail, searchCustomers } from '../src/customers.js';
 
 function database() {
   const db=new DatabaseSync(':memory:');
-  for (const file of ['0001_inventory.sql','0002_better_auth.sql']) {
+  for (const file of ['0001_inventory.sql','0002_better_auth.sql','0003_customer_orders.sql']) {
     db.exec(readFileSync(new URL('../migrations/'+file,import.meta.url),'utf8'));
   }
   db.exec(`INSERT INTO users VALUES('manager','admin@example.com','manager',1),('employee','staff@example.com','employee',1);
@@ -56,4 +57,33 @@ test('stock and pricing validators preserve input meaning',()=>{
   assert.throws(()=>date('2026-02-30'));
   assert.equal(skuOf(' lm15 '),'LM15');
   assert.equal(dayInZone('America/Guyana',new Date('2026-11-20T01:00:00Z')),'2026-11-19');
+});
+
+test('customer search, grouped order history and returns count each line once',async()=>{
+  const sqlite=database();
+  const db={
+    async one(query,...params) { return sqlite.prepare(query).get(...params); },
+    async all(query,...params) { return sqlite.prepare(query).all(...params); },
+    async run(query,...params) { return sqlite.prepare(query).run(...params); }
+  };
+  const customer=await createCustomer(db,{name:'Alex Customer',phone:'+592 (555) 0199',email:'Alex@Example.com'});
+  await assert.rejects(()=>createCustomer(db,{name:'Duplicate',phone:'5925550199'}),/already uses/);
+  for(const q of ['Alex','555-0199','alex@example.com']) {
+    const results=await searchCustomers(db,new URL('https://shop.test/?'+new URLSearchParams({q})));
+    assert.equal(results.items[0].id,customer.id);
+  }
+  sqlite.prepare("INSERT INTO orders(id,customer_id,sold_on,closed_by) VALUES('o1',?,'2026-01-31','manager')").run(customer.id);
+  sqlite.exec(`INSERT INTO sales(id,sku,quantity,sold_on,submitted_by,order_id) VALUES
+    ('s1','LM15',1,'2026-01-31','employee','o1'),('s2','LM15',2,'2026-01-31','employee','o1');
+    UPDATE sales SET status='approved',unit_price=150000 WHERE id IN ('s1','s2');
+    INSERT INTO returns VALUES('r1','s2','2026-02-03',1,'Returned','manager',1,150000),
+                              ('r2','s2','2026-02-05',0,'Returned','manager',1,100000);`);
+  const history=await listOrders(db,new URL('https://shop.test/?customer='+customer.id));
+  assert.equal(history.items.length,1);
+  assert.equal(history.items[0].line_count,2);
+  assert.equal(history.items[0].gross,450000);
+  assert.equal(history.items[0].refunds,250000);
+  const detail=await orderDetail(db,'o1');
+  assert.equal(detail.lines.find(line=>line.id==='s2').returns.length,2);
+  assert.equal(sqlite.prepare('SELECT on_hand FROM stock').get().on_hand,1);
 });

@@ -1,6 +1,7 @@
 import { HttpError, assert, clean, skuOf, units, money, date, dayInZone, offsetDay, emailOf, hashToken, goodImage } from './helpers.js';
 import { buildAuth, seedAdmin, staffSession } from './auth.js';
 import { dashboard } from './dashboard.js';
+import { searchCustomers, createCustomer, customerId, customerDetail, listOrders, orderDetail } from './customers.js';
 
 const id = () => crypto.randomUUID();
 const json = (value, status = 200, headers = {}) => Response.json(value, {
@@ -138,15 +139,60 @@ async function catalog(db,url,staff) {
 }
 async function salesList(db,user) {
   const manager = user.role === 'manager';
-  const fields = manager ? ',s.unit_price,u.email AS employee,(SELECT COALESCE(SUM(r.quantity),0) FROM returns r WHERE r.sale_id=s.id) AS returned' : '';
+  const fields = manager ? ',s.order_id,o.customer_id,c.name AS customer_name,s.unit_price,u.email AS employee,(SELECT COALESCE(SUM(r.quantity),0) FROM returns r WHERE r.sale_id=s.id) AS returned' : '';
   const sales = await db.all(`SELECT s.id,s.sku,s.quantity,s.sold_on,s.status,s.submitted_at,p.name${fields}
     FROM sales s JOIN products p ON p.sku=s.sku JOIN users u ON u.id=s.submitted_by
-    ${manager ? '' : 'WHERE s.submitted_by=?'}
+    ${manager ? 'LEFT JOIN orders o ON o.id=s.order_id LEFT JOIN customers c ON c.id=o.customer_id' : 'WHERE s.submitted_by=?'}
     ORDER BY s.status='pending' DESC,s.submitted_at DESC LIMIT 100`,...(manager ? [] : [user.id]));
   const notes = await db.all(`SELECT n.sale_id,n.note,n.created_at FROM sale_notes n JOIN sales s ON n.sale_id=s.id
     ${manager ? '' : 'WHERE s.submitted_by=?'} ORDER BY n.created_at DESC LIMIT 500`,...(manager ? [] : [user.id]));
   for (const sale of sales) sale.notes = notes.filter(note => note.sale_id === sale.id);
   return sales;
+}
+async function closePendingOrder(db,user,items,customer,today) {
+  assert(Array.isArray(items) && items.length>0 && items.length<=20,'Select between 1 and 20 pending sale lines.');
+  const ids = items.map(item=>clean(item.id,80));
+  assert(new Set(ids).size===ids.length,'Select each sale line only once.');
+  const placeholders = ids.map(()=>'?').join(',');
+  const pending = await db.all(`SELECT * FROM sales WHERE status='pending' AND id IN (${placeholders})`,...ids);
+  assert(pending.length===ids.length,'A sale is no longer pending. Refresh and try again.',409);
+  const order = id();
+  const lines = items.map((item,index)=>{
+    const sale = pending.find(row=>row.id===ids[index]);
+    const quantity = units(item.quantity ?? sale.quantity);
+    const unitPrice = money(item.unit_price);
+    assert(quantity>0,'Enter at least one unit per line.');
+    assert(unitPrice!==null,'Enter the actual selling price for each line.');
+    return {id:sale.id,sku:skuOf(item.sku || sale.sku),quantity,unitPrice,
+      soldOn:transactionDay(item.sold_on,today,sale.sold_on),note:clean(item.note,2000)};
+  });
+  const soldOn = lines[0].soldOn;
+  assert(lines.every(line=>line.soldOn===soldOn),'All items in an order must use the same sale date.');
+  // The database rechecks every line inside the write batch. A concurrent closeout rolls back this entire order.
+  const statements = [db.sql(`INSERT INTO orders(id,customer_id,sold_on,closed_by) VALUES(
+    CASE WHEN (SELECT COUNT(*) FROM sales WHERE status='pending' AND id IN (${placeholders}))=? THEN ? END,?,?,?)`,
+    ...ids,ids.length,order,customer,soldOn,user.id)];
+  for (const line of lines) {
+    statements.push(db.sql(`UPDATE sales SET sku=?,quantity=?,sold_on=?,unit_price=?,order_id=?,status='approved',
+      reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?`,line.sku,line.quantity,line.soldOn,line.unitPrice,order,user.id,line.id),
+      audit(db,user,'sale.approved',line.id,line.note));
+    if (line.note) statements.push(db.sql('INSERT INTO sale_notes(id,sale_id,actor,note) VALUES(?,?,?,?)',id(),line.id,user.id,line.note));
+  }
+  statements.push(audit(db,user,'order.closed',order));
+  await db.batch(statements);
+  return order;
+}
+async function assignCustomerToSale(db,user,saleId,customer) {
+  const sale = await db.one("SELECT id,order_id,sold_on FROM sales WHERE id=? AND status='approved'",saleId);
+  assert(sale,'Approved sale unavailable.',404);
+  const order = sale.order_id ?? id();
+  const statements = sale.order_id
+    ? [db.sql('UPDATE orders SET customer_id=? WHERE id=?',customer,order)]
+    : [db.sql(`INSERT INTO orders(id,customer_id,sold_on,closed_by) VALUES(
+      CASE WHEN (SELECT order_id FROM sales WHERE id=?) IS NULL THEN ? END,?,?,?)`,saleId,order,customer,sale.sold_on,user.id),
+      db.sql('UPDATE sales SET order_id=? WHERE id=?',order,saleId)];
+  await db.batch([...statements,audit(db,user,'order.customer',order)]);
+  return order;
 }
 async function resolveImport(db,user,rowId,input,today) {
   const row = await db.one('SELECT * FROM import_rows WHERE id=?',rowId);
@@ -238,8 +284,12 @@ async function api(request,env,db,url) {
     const statements = [db.sql('INSERT INTO sales(id,sku,quantity,sold_on,submitted_by) VALUES(?,?,?,?,?)',sale,sku,quantity,soldOn,user.id)];
     if (input.direct) {
       requireManager(user);
-      statements.push(db.sql("UPDATE sales SET status='approved',unit_price=?,reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?",
-        money(input.unit_price),user.id,sale));
+      const customer = await customerId(db,input.customer_id);
+      const order = id();
+      statements.push(db.sql('INSERT INTO orders(id,customer_id,sold_on,closed_by) VALUES(?,?,?,?)',order,customer,soldOn,user.id),
+        db.sql("UPDATE sales SET order_id=?,status='approved',unit_price=?,reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?",
+          order,money(input.unit_price),user.id,sale),
+        audit(db,user,'order.closed',order));
     }
     statements.push(audit(db,user,input.direct ? 'sale.direct' : 'sale.submit',sale));
     await db.batch(statements);
@@ -268,6 +318,12 @@ async function api(request,env,db,url) {
   }
 
   requireManager(user);
+  const customerRoute = path.match(/^\/api\/staff\/customers\/([a-f0-9-]+)$/);
+  const orderRoute = path.match(/^\/api\/staff\/orders\/([a-f0-9-]+)$/);
+  if (path === '/api/staff/customers' && method === 'GET') return json(await searchCustomers(db,url));
+  if (customerRoute && method === 'GET') return json(await customerDetail(db,customerRoute[1]));
+  if (path === '/api/staff/orders' && method === 'GET') return json(await listOrders(db,url));
+  if (orderRoute && method === 'GET') return json(await orderDetail(db,orderRoute[1]));
   if (path === '/api/staff/dashboard' && method === 'GET') return json(await dashboard(db,url,today));
   if (path === '/api/staff/issues' && method === 'GET') {
     return json(await db.all(`SELECT i.*,p.name,(SELECT group_concat(id) FROM photos WHERE issue_id=i.id) photos
@@ -282,6 +338,16 @@ async function api(request,env,db,url) {
   }
   if (method !== 'POST') throw new HttpError(404,'Page not found.');
   const input = await request.json();
+  if (path === '/api/staff/customers') return json(await createCustomer(db,input),201);
+  if (path === '/api/staff/orders') {
+    const customer = await customerId(db,input.customer_id);
+    return json({order_id:await closePendingOrder(db,user,input.items,customer,today)},201);
+  }
+  const customerAssignment = path.match(/^\/api\/staff\/sales\/([a-f0-9-]+)\/customer$/);
+  if (customerAssignment) {
+    const customer = await customerId(db,input.customer_id);
+    return json({order_id:await assignCustomerToSale(db,user,customerAssignment[1],customer)});
+  }
   if (path === '/api/staff/team') {
     const email = emailOf(input.email);
     assert(email !== user.email,'Your own access is managed by the account setup.');
@@ -356,6 +422,10 @@ async function api(request,env,db,url) {
     const sale = await db.one('SELECT * FROM sales WHERE id=? AND status=\'pending\'',review[1]);
     assert(sale,'This sale is no longer pending.',409);
     assert(['approved','canceled','pending'].includes(input.status),'Select a review action.');
+    if (input.status==='approved') {
+      const customer = await customerId(db,input.customer_id);
+      return json({order_id:await closePendingOrder(db,user,[{...input,id:sale.id}],customer,today)});
+    }
     const sku = input.status === 'canceled' ? sale.sku : skuOf(input.sku || sale.sku);
     const quantity = input.status === 'canceled' ? sale.quantity : units(input.quantity ?? sale.quantity);
     assert(quantity > 0,'Enter at least one unit.');
@@ -432,6 +502,7 @@ export default {
       for (const readable of ['Insufficient available stock','Insufficient batch stock','Reserved stock cannot be removed','Enter the actual selling price','Return exceeds the remaining sold quantity']) {
         if (message.includes(readable)) return json({error:readable+'.'},409);
       }
+      if (message.includes('NOT NULL constraint failed: orders.id')) return json({error:'The sale changed. Refresh and try again.'},409);
       if (message.includes('UNIQUE constraint failed')) return json({error:'This record already exists. Refresh and try again.'},409);
       console.error(message);
       return json({error:message.includes('no such table') ? migrationsHint : 'The request could not be completed.'},500);
