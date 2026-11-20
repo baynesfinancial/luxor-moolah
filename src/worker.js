@@ -346,8 +346,23 @@ async function api(request,env,db,url) {
   if (orderRoute && method === 'GET') return json(await orderDetail(db,orderRoute[1]));
   if (path === '/api/staff/dashboard' && method === 'GET') return json(await dashboard(db,url,today));
   if (path === '/api/staff/issues' && method === 'GET') {
-    return json(await db.all(`SELECT i.*,p.name,(SELECT group_concat(id) FROM photos WHERE issue_id=i.id) photos
-      FROM issues i JOIN products p ON p.sku=i.sku ORDER BY i.resolved_at IS NOT NULL,i.created_at DESC LIMIT 100`));
+    const select=`SELECT i.*,p.name,(SELECT group_concat(id) FROM photos WHERE issue_id=i.id) photos
+      FROM issues i JOIN products p ON p.sku=i.sku`;
+    const order=' ORDER BY i.resolved_at IS NOT NULL,i.created_at DESC,i.id';
+    if (url.searchParams.get('report')!=='1') return json(await db.all(select+order+' LIMIT 100'));
+    const status=url.searchParams.get('status');
+    const productType=Number(url.searchParams.get('type'))||null;
+    const page=Math.max(1,Math.min(100000,Number.parseInt(url.searchParams.get('page')??'1',10)||1));
+    const size=25;
+    const where=` WHERE (? IS NULL OR p.type_id=?)${status==='open'?' AND i.resolved_at IS NULL':
+      status==='resolved'?' AND i.resolved_at IS NOT NULL':''}`;
+    const filters=[productType,productType];
+    const [items,counts]=await Promise.all([
+      db.all(select+where+order+' LIMIT ? OFFSET ?',...filters,size+1,(page-1)*size),
+      db.one(`SELECT count(*) AS total, count(*) FILTER(WHERE i.resolved_at IS NULL) AS open,
+        count(i.resolved_at) AS resolved FROM issues i JOIN products p ON p.sku=i.sku`+where,...filters)
+    ]);
+    return json({items:items.slice(0,size),counts,page,next:items.length>size});
   }
   if (path === '/api/staff/team' && method === 'GET') {
     return json(await db.all('SELECT email,role,active FROM users ORDER BY role DESC,email'));

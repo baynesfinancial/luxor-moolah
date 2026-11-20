@@ -149,7 +149,7 @@ function signIn() {
   });
 }
 const staffLink = (tab,values={}) => '/staff?'+new URLSearchParams({tab,...values});
-const managerSections = [['Overview','▦'],['Orders','▤'],['Customers','◇'],['Inventory','▧'],['Reports','▥'],['Damage reports','⚑'],['Team','○']];
+const managerSections = [['Overview','▦'],['Orders','▤'],['Customers','◇'],['Inventory','▧'],['Reports','▥'],['Team','○']];
 
 async function openStaff() {
   try { staff=await api('/api/staff/me'); }
@@ -157,11 +157,12 @@ async function openStaff() {
   const manager=staff.role==='manager';
   const params=new URLSearchParams(location.search);
   const sku=params.get('sku');
-  const aliases={Dashboard:'Overview',Sales:'Orders','CSV upload':'Inventory',Categories:'Inventory'};
+  const aliases={Dashboard:'Overview',Sales:'Orders','CSV upload':'Inventory',Categories:'Inventory','Damage reports':'Reports'};
   const requested=params.get('tab');
   if (manager) {
     if (requested==='Sales' && !params.has('view')) params.set('view','pending');
     if (requested==='CSV upload') params.set('view','upload');
+    if (requested==='Damage reports') params.set('view','damage');
     if (requested==='Categories') params.set('view','categories');
   }
   const tabs=manager?managerSections:[['Inventory','▧'],['My sales','▤']];
@@ -202,9 +203,9 @@ function setPendingCount(count) {
 function workspaceHeading(title,actions='') {
   return `<div class="workspace-heading"><h1>${esc(title)}</h1>${actions?'<div class="controls">'+actions+'</div>':''}</div>`;
 }
-function subnav(tab,views,current) {
+function subnav(tab,views,current,params={}) {
   return `<nav class="workspace-subnav" aria-label="${esc(tab)} views">${views.map(([key,label])=>
-    `<a href="${esc(staffLink(tab,{view:key}))}" ${key===current?'aria-current="page"':''}>${esc(label)}</a>`).join('')}</nav>`;
+    `<a href="${esc(staffLink(tab,{...params,view:key}))}" ${key===current?'aria-current="page"':''}>${esc(label)}</a>`).join('')}</nav>`;
 }
 async function loadTab(tab,sku=null,params=new URLSearchParams(location.search)) {
   const body=$('#staffbody');
@@ -221,7 +222,6 @@ async function loadTab(tab,sku=null,params=new URLSearchParams(location.search))
       return await renderOrdersPage(body,params.get('view'));
     }
     if (tab==='Customers') return await renderCustomers(body,params.get('customer'));
-    if (tab==='Damage reports') return await renderIssues(body);
     if (tab==='Team') return await renderTeam(body);
     if (tab==='Reports') return await renderDashboard(body,params);
     return await renderOverview(body,params);
@@ -622,17 +622,18 @@ async function renderOrders(body,id,from='all') {
     notify('Order customer updated.'); await renderOrders(body,id,from);
   });
 }
-async function renderIssues(body) {
-  const issues=await api('/api/staff/issues');
-  body.innerHTML=workspaceHeading('Damage reports')+`${issues.length?issues.map(issue=>`<div class="frame">
-    <div class="actions"><a href="/staff?sku=${esc(issue.sku)}">${esc(issue.name)} · ${esc(issue.sku)}</a>
-    ${badge(issue.resolved_at?'Resolved':'Needs review',!issue.resolved_at)}</div>
+function renderIssueCards(target,issues,refresh) {
+  target.innerHTML=`<section class="frame report-results"><h2>Damage log</h2>
+    ${issues.length?issues.map(issue=>`<details class="report-row damage-row">
+    <summary><span class="report-row-title">${esc(issue.name)}</span>
+    <span class="report-row-key">${badge(issue.resolved_at?'Resolved':'Open',!issue.resolved_at)}</span></summary>
+    <div class="damage-detail"><p class="small">${staffAnchor('/staff?sku='+encodeURIComponent(issue.sku),issue.sku)} · Reported ${esc(issue.created_at.slice(0,10))}</p>
     <p>${esc(issue.note)}</p><div class="photo-row">${list(issue.photos).map(photo=>
       `<a href="/api/photo/${esc(photo)}" target="_blank" rel="noopener">${img(photo,'Damage report photo','issue-img')}</a>`).join('')}</div>
-    ${issue.resolved_at?`<p>${esc(issue.resolution)}</p>`:`<form data-resolve="${issue.id}" class="formgrid">${text('note','Manager resolution')}
-    <div class="span">${button('Resolve report')}</div></form>`}</div>`).join(''):empty('No damage reports.')}`;
-  $$('[data-resolve]',body).forEach(form=>formHandler(form,async data=>{
-    await api(`/api/staff/issues/${form.dataset.resolve}/resolve`,data);notify('Report resolved.');await renderIssues(body);
+    ${issue.resolved_at?`<p><strong>Resolution</strong> ${esc(issue.resolution)}</p>`:`<form data-resolve="${esc(issue.id)}" class="formgrid">${text('note','Manager resolution')}
+    <div class="span">${button('Resolve report')}</div></form>`}</div></details>`).join(''):empty('No damage reports match these filters.')}</section>`;
+  $$('[data-resolve]',target).forEach(form=>formHandler(form,async data=>{
+    await api(`/api/staff/issues/${form.dataset.resolve}/resolve`,data);notify('Report resolved.');await refresh();
   }));
 }
 function renderCategories(body) {
@@ -860,7 +861,7 @@ async function renderOverview(body,params) {
         <div class="dashboard-columns">${overviewChart(data,compare)}
           <div class="dashboard-side"><section class="frame dashboard-panel dashboard-attention"><h2>Needs attention</h2>
           ${attentionLink('Pending approvals','Sales waiting for review',attention.pending,approvals)}
-          ${attentionLink('Damage reports','Open reports from staff',attention.issues,staffLink('Damage reports'))}
+          ${attentionLink('Damage reports','Open reports from staff',attention.issues,staffLink('Reports',{view:'damage'}))}
           ${attentionLink('Low-stock sellers','Last units available',low.length,lowStock)}</section>
           ${overviewThemes(data.themeTrends,compare && completePrior,days)}</div>
         </div>
@@ -885,88 +886,155 @@ async function renderOverview(body,params) {
   comparison.addEventListener('change',change);
   await refresh();
 }
-async function renderDashboard(body,params) {
-  const days=overviewDays(params.get('days'));
-  let closeoutSku='';
-  body.innerHTML=workspaceHeading('Reports')+`<div class="frame"><form id="daterange" class="formgrid">
-    <label>Period<select name="preset"><option value="30">Last 30 days</option><option value="7">Last 7 days</option><option value="3m">Last three calendar months</option><option value="month">This month</option><option value="custom">Custom dates</option></select></label>
-    ${field('start','From',addDays(meta.today,1-days),'date','required')}${field('end','Through',meta.today,'date','required')}
-    <label>Compare with<select name="compare"><option value="previous">Previous equivalent period</option><option value="year">Same period last year</option></select></label>
-    <label>Group results<select name="group"><option value="day">Day</option><option value="week">Week</option><option value="month">Month</option></select></label>
-    <label>Product type<select name="type">${options('type',null,'All product types')}</select></label>
-    <div class="span">${button('Apply filters')}</div></form></div><div id="report"></div>`;
-  const form=$('#daterange',body);
-  if (days===7) form.elements.preset.value='7';
-  if (days===90) form.elements.preset.value='custom';
-  let reportVersion=0;
-  const refresh=async (values,showCloseout=false)=>{
-    const request=++reportVersion;
-    const report=$('#report',body);
-    report.innerHTML=empty('Loading reports…');
-    try {
-      const data=await api('/api/staff/dashboard?'+new URLSearchParams({...values,sku:closeoutSku}));
-      if (request!==reportVersion) return;
-      drawDashboard(report,data,closeoutSku,showCloseout || location.hash==='#stock-closeout');
-      formHandler($('#closeout-filter',report),async filters=>{
-        const value=filters.sku.trim();
-        if (value && !/^[A-Z0-9][A-Z0-9_-]{0,39}$/i.test(value)) throw new Error('Enter a valid SKU.');
-        closeoutSku=value;
-        await refresh(format(form),true);
-      });
-    } catch(error){if (request===reportVersion) report.innerHTML=empty(error.message);}
-  };
-  formHandler(form,values=>refresh(values));
-  form.elements.preset.addEventListener('change',()=>{
-    const preset=form.elements.preset.value;
-    if(preset==='custom') return;
-    form.elements.start.value=preset==='3m'?monthsBack(meta.today,2):preset==='month'?monthsBack(meta.today,0):addDays(meta.today,1-Number(preset));
-    form.elements.end.value=meta.today;
-    if(preset==='3m') form.elements.group.value='month';
-    refresh(format(form));
-  });
-  for(const name of ['start','end']) form.elements[name].addEventListener('change',()=>{form.elements.preset.value='custom';});
-  await refresh(format(form));
-  if (location.hash==='#theme-trends') $('#theme-trends',body)?.scrollIntoView();
+const reportViews=[['sales','Sales & profit'],['themes','Product themes'],['low','Low-stock sellers'],
+  ['aging','Stock over 90 days'],['closeout','Stock closeout'],['storefront','Storefront activity'],['damage','Damage reports']];
+
+function reportMetrics(metrics) {
+  return `<div class="dashboard-metrics report-metrics">${metrics.map(([label,value,caption])=>
+    `<div class="dashboard-metric"><span class="dashboard-metric-label">${esc(label)}</span>
+      <strong>${esc(value)}</strong>${caption?`<small>${esc(caption)}</small>`:''}</div>`).join('')}</div>`;
 }
-function drawDashboard(report,data,sku,showCloseout) {
-  const metric=(label,value,caption='')=>`<div class="metric"><span class="small">${esc(label)}</span><strong>${esc(value)}</strong><small>${esc(caption)}</small></div>`;
-  const section=(name,head,rows)=>`<details class="frame"><summary>${esc(name)}</summary>${table(head,rows)}</details>`;
-  const net=s=>s.revenue-s.refund;
+function reportTable(headers,rows,keyColumn=1) {
+  const cards=rows.map(row=>`<details class="report-row"><summary>
+    <span class="report-row-title">${esc(row[0])}</span>
+    <span class="report-row-key"><small>${esc(headers[keyColumn])}</small>${esc(row[keyColumn])}</span>
+    </summary><dl>${headers.map((header,i)=>i===0||i===keyColumn?'':`<div><dt>${esc(header)}</dt><dd>${esc(row[i])}</dd></div>`).join('')}</dl></details>`);
+  return rows.length?`<div class="report-desktop">${table(headers,rows)}</div><div class="report-mobile">${cards.join('')}</div>`:
+    empty('No records match these filters.');
+}
+function reportPanel(title,contents) {
+  return `<section class="frame report-results"><h2>${esc(title)}</h2>${contents}</section>`;
+}
+function drawReport(view,data) {
   const compareOk=data.coverage && data.prior.start>=data.coverage;
-  const changed=(current,previous,formatValue=x=>x)=>!compareOk?'No historical data':
-    [`${current>=previous?'+':''}${formatValue(current-previous)}`,previous?`(${Math.round((current-previous)/Math.abs(previous)*100)}%)`:''].join(' ');
-  const max=Math.max(1,...data.series.map(row=>row.revenue));
-  const popular=[...data.interest].sort((a,b)=>b.views-a.views);
-  const byName=item=>`${item.name} (${item.sku})`;
-  report.innerHTML=`<div class="metrics">
-    ${metric('Pending approvals',data.attention.pending,`${data.attention.issues} open damage reports`)}
-    ${metric('Inventory cost',price(data.snapshot.value),`${data.snapshot.unknown_cost} units with unknown cost`)}
-    ${metric('Stock over 90 days',data.age.reduce((total,item)=>total+item.units,0),`${data.snapshot.unknown_age} units with unknown age`)}
-    ${metric('Net sales',price(net(data.sales)),changed(net(data.sales),net(data.previous),price))}</div>
-    <div class="metrics">${metric('Units sold',data.sales.units,changed(data.sales.units,data.previous.units))}
-    ${metric('Units returned',data.sales.returned)}${metric('Gross profit',price(data.sales.profit),data.sales.unknown?`${data.sales.unknown} entries with missing cost`:changed(data.sales.profit,data.previous.profit,price))}
-    ${metric('Units on hand',data.snapshot.units)}</div>
-    <div class="frame"><h3>Sales over time</h3><p class="small">${esc(data.span.start)} to ${esc(data.span.end)} · Comparison ${esc(data.prior.start)} to ${esc(data.prior.end)}</p>
-    ${!data.coverage||data.span.start<data.coverage?'<p class="small">Historical coverage is incomplete for the selected period.</p>':''}
-    ${data.series.length?`<div class="chart">${data.series.map(row=>`<div class="chart-row"><span>${esc(row.bucket)}</span>
-    <meter min="0" max="${max}" value="${row.revenue}" aria-label="Gross sales for ${esc(row.bucket)}"></meter><span>${esc(price(row.revenue))}</span></div>`).join('')}</div>`:empty('No approved sales in this date range.')}</div>
-    <details class="frame" id="stock-closeout" ${showCloseout?'open':''}><summary>Stock closeout</summary>
-      <form id="closeout-filter" class="controls">${field('sku','Closeout SKU',sku,'text','placeholder="All SKUs"')}${button('Filter stock closeout','secondary')}</form>
-      ${table(['SKU','Opening','Received','Sold','Restocked','Adjusted','Closing'],
-        data.closeout.map(r=>[byName(r),r.opening,r.received,r.sold,r.restocked,r.adjusted,r.closing]))}</details>
-    ${section('Stock over 90 days',['Product','Oldest batch','Units','Cost'],data.age.map(r=>[byName(r),r.oldest,r.units,price(r.value)]))}
-    <details class="frame" id="theme-trends" ${location.hash==='#theme-trends'?'open':''}><summary>Product theme trends</summary>
-      <p class="small">Approved units sold across SKUs, including sold-out items. An item can count toward more than one theme.</p>
-      ${table(['Theme','Units sold','Distinct SKUs sold','Prior units','Change'],data.themeTrends.map(theme=>[
-        theme.name,theme.units,theme.sku_count,compareOk?theme.previous:'—',compareOk?theme.change:'—'
-      ]))}</details>
-    ${section('Trending sales',['Product','Units','Prior units','Change'],data.trends.map(r=>[byName(r),r.units,compareOk?r.previous:'—',compareOk?r.change:'—']))}
-    ${section('Low-stock sellers',['Product','Available'],data.low.map(r=>[byName(r),r.available]))}
-    ${section('No approved sales in this period',['Product','Available'],data.slow.map(r=>[byName(r),r.available]))}
-    ${section('Least-viewed active listings',['Product','Published','Views','WhatsApp clicks'],
-      [...popular].reverse().map(r=>[byName(r),r.published_at?.slice(0,10)||'—',r.views,r.clicks]))}
-    ${section('Most-viewed active listings',['Product','Published','Views','WhatsApp clicks'],
-      popular.map(r=>[byName(r),r.published_at?.slice(0,10)||'—',r.views,r.clicks]))}`;
+  const delta=(value,prior)=>compareOk?`${value>prior?'+':''}${value-prior}`:'—';
+  const byName=item=>`${item.name} · ${item.sku}`;
+  const total=(rows,key)=>rows.reduce((sum,row)=>sum+(row[key]??0),0);
+  if (view==='sales') {
+    const {sales,previous}=data;
+    const max=Math.max(1,...data.series.map(row=>row.revenue));
+    return {
+      metrics:[['Net sales',price(netSales(sales)),compareOk?`${price(netSales(previous))} in comparison period`:''],
+        ['Gross profit',price(sales.profit),sales.unknown?`${sales.unknown} entries with missing cost`:''],
+        ['Refunds',price(sales.refund),`${sales.returned} units returned`]],
+      results:reportPanel('Sales results',
+        `<p class="small">${esc(data.span.start)} to ${esc(data.span.end)} · Comparison ${esc(data.prior.start)} to ${esc(data.prior.end)}</p>
+        ${!data.coverage||data.span.start<data.coverage?'<p class="small">Historical coverage is incomplete for the selected period.</p>':''}
+        ${reportTable(['Measure','Selected period','Comparison period'],[
+          ['Net sales',price(netSales(sales)),compareOk?price(netSales(previous)):'—'],
+          ['Gross profit',price(sales.profit),compareOk?price(previous.profit):'—'],
+          ['Refunds',price(sales.refund),compareOk?price(previous.refund):'—'],
+          ['Units sold',sales.units,compareOk?previous.units:'—'],
+          ['Units returned',sales.returned,compareOk?previous.returned:'—']])}`)+
+        reportPanel('Gross sales over time',data.series.length?`<div class="chart">${data.series.map(row=>`<div class="chart-row">
+         <span>${esc(row.bucket)}</span><meter min="0" max="${max}" value="${row.revenue}" aria-label="Gross sales for ${esc(row.bucket)}"></meter>
+         <span>${esc(price(row.revenue))}</span></div>`).join('')}</div>`:empty('No approved sales in this period.'))
+    };
+  }
+  if (view==='themes') return {
+    metrics:[['Top theme',data.themeTrends.find(row=>row.units>0)?.name??'—'],
+      ['Units sold',data.sales.units],['Themes with sales',data.themeTrends.filter(row=>row.units>0).length]],
+    results:reportPanel('Sales by theme','<p class="small">Sold-out products count toward their themes. An item can count toward more than one theme.</p>'+
+      reportTable(['Theme','Units sold','Distinct SKUs sold','Prior units','Change'],data.themeTrends.map(row=>[
+        row.name,row.units,row.sku_count,compareOk?row.previous:'—',delta(row.units,row.previous)
+      ])))+reportPanel('Trending SKUs',reportTable(['Product','Units sold','Prior units','Change'],data.trends.map(row=>[
+        byName(row),row.units,compareOk?row.previous:'—',delta(row.units,row.previous)])))
+  };
+  if (view==='low') return {
+    metrics:[['Matching SKUs',data.low.length],['Units available',total(data.low,'available')]],
+    results:reportPanel('Last units available','<p class="small">Items with sales in this period and three or fewer units available.</p>'+
+      reportTable(['Product','Available','SKU'],data.low.map(row=>[row.name,row.available,row.sku])))+
+      reportPanel('No approved sales in this period',reportTable(['Product','Available','SKU'],data.slow.map(row=>[row.name,row.available,row.sku])))
+  };
+  if (view==='aging') return {
+    metrics:[['Units over 90 days',total(data.age,'units')],
+      ['Inventory cost',price(total(data.age,'value'))],['Units with unknown age',data.snapshot.unknown_age]],
+    results:reportPanel('Aged inventory',reportTable(['Product','Oldest batch','Units on hand','Cost'],
+      data.age.map(row=>[byName(row),row.oldest,row.units,price(row.value)]),2))
+  };
+  if (view==='closeout') return {
+    metrics:[['Matching SKUs',data.closeout.length],['Units received',total(data.closeout,'received')],['Closing units',total(data.closeout,'closing')]],
+    results:reportPanel('Stock movement by SKU',reportTable(['Product','Opening','Received','Sold','Restocked','Adjusted','Closing'],
+      data.closeout.map(row=>[byName(row),row.opening,row.received,row.sold,row.restocked,row.adjusted,row.closing]),6))
+  };
+  const popular=[...data.interest].sort((a,b)=>b.views-a.views || a.name.localeCompare(b.name));
+  const listings=rows=>reportTable(['Product','Published','Views','WhatsApp clicks'],
+    rows.map(row=>[byName(row),row.published_at?.slice(0,10)||'—',row.views,row.clicks]),2);
+  return {
+    metrics:[['Product views',total(popular,'views')],['WhatsApp clicks',total(popular,'clicks')],['Active listings',popular.length]],
+    results:reportPanel('Most-viewed active listings',listings(popular))+
+      reportPanel('Least-viewed active listings',listings([...popular].reverse()))
+  };
+}
+async function renderDashboard(body,params) {
+  const requested=params.get('view') || ({'#theme-trends':'themes','#stock-closeout':'closeout'})[location.hash];
+  const view=reportViews.some(([key])=>key===requested)?requested:'sales';
+  const title=reportViews.find(([key])=>key===view)[1];
+  const days=overviewDays(params.get('days'));
+  const compare=view==='sales'||view==='themes';
+  const dated=view!=='aging' && view!=='damage';
+  body.innerHTML=workspaceHeading('Reports')+
+    subnav('Reports',reportViews,view,params.has('days')?{days}:{})+
+    `<h2>${esc(title)}</h2><div id="report-metrics" aria-live="polite"></div>
+    <div class="frame report-filters"><form id="daterange" class="controls">
+    ${dated?`<label>Period<select name="preset">
+      ${[['7','Last 7 days'],['30','Last 30 days'],['90','Last 90 days'],['3m','Last three calendar months'],['month','This month'],['custom','Custom dates']].map(([key,label])=>option(key,label,days)).join('')}
+    </select></label>
+    ${field('start','From',addDays(meta.today,1-days),'date','required')}${field('end','Through',meta.today,'date','required')}`:''}
+    <label>Product type<select name="type">${options('type',null,'All product types')}</select></label>
+    ${compare?`<label>Compare with<select name="compare"><option value="previous">Previous equivalent period</option><option value="year">Same period last year</option></select></label>`:''}
+    ${view==='sales'?`<label>Group results<select name="group"><option value="day">Day</option><option value="week">Week</option><option value="month">Month</option></select></label>`:''}
+    ${view==='closeout'?field('sku','SKU','','text','placeholder="All SKUs"'):''}
+    ${view==='damage'?`<label>Status<select name="status"><option value="">All statuses</option><option value="open">Open</option><option value="resolved">Resolved</option></select></label>`:''}
+    ${button('Apply filters')}</form></div><div id="report" aria-live="polite"></div>`;
+  const form=$('#daterange',body);
+  const metrics=$('#report-metrics',body);
+  const target=$('#report',body);
+  if (view==='sales') form.elements.group.value=days===7?'day':'week';
+  let version=0;
+  async function refresh() {
+    const request=++version;
+    target.innerHTML=empty('Loading report…');
+    metrics.innerHTML='';
+    try {
+      const query=new URLSearchParams(format(form));
+      if (view==='damage') {
+        query.set('report','1');
+        if (form.dataset.page) query.set('page',form.dataset.page);
+      }
+      if (view==='aging'||view==='low') query.set('summary','1');
+      const data=await api((view==='damage'?'/api/staff/issues?':'/api/staff/dashboard?')+query);
+      if (request!==version) return;
+      if (view==='damage') {
+        metrics.innerHTML=reportMetrics([['Matching reports',data.counts.total],['Open',data.counts.open],['Resolved',data.counts.resolved]]);
+        renderIssueCards(target,data.items,refresh);
+        paginate(target,data,next=>{
+          form.dataset.page=String(next);
+          return refresh();
+        });
+      } else {
+        const report=drawReport(view,data);
+        metrics.innerHTML=reportMetrics(report.metrics);
+        target.innerHTML=report.results;
+      }
+    } catch(error) { if (request===version) target.innerHTML=empty(error.message); }
+  }
+  formHandler(form,async values=>{
+    if (values.sku?.trim() && !/^[A-Z0-9][A-Z0-9_-]{0,39}$/i.test(values.sku.trim())) throw new Error('Enter a valid SKU.');
+    delete form.dataset.page;
+    await refresh();
+  });
+  if (dated) {
+    form.elements.preset.addEventListener('change',()=>{
+      const preset=form.elements.preset.value;
+      if (preset==='custom') return;
+      form.elements.start.value=preset==='3m'?monthsBack(meta.today,2):preset==='month'?meta.today.slice(0,7)+'-01':addDays(meta.today,1-Number(preset));
+      form.elements.end.value=meta.today;
+      if (view==='sales') form.elements.group.value=preset==='3m'?'month':preset==='7'?'day':'week';
+    });
+    for(const name of ['start','end']) form.elements[name].addEventListener('change',()=>{form.elements.preset.value='custom';});
+  }
+  await refresh();
 }
 async function boot() {
   try {
