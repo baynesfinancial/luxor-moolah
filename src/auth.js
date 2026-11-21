@@ -14,8 +14,8 @@ async function sendEmail(env, origin, email, link, reset=false) {
   const result = await fetch('https://api.resend.com/emails',{
     method:'POST',headers:{Authorization:`Bearer ${env.RESEND_API_KEY}`,'Content-Type':'application/json'},
     body:JSON.stringify({
-      from:env.MAIL_FROM,to:[email], subject:reset?'Reset your Luxor Moolah password':'Your Luxor Moolah staff access',
-      text:`Use this one-time link to ${reset?'reset your Luxor Moolah password':'open the Luxor Moolah staff workspace'}. It expires in 30 minutes.\n\n${link}`
+      from:env.MAIL_FROM,to:[email], subject:reset?'Reset your Luxor password':'Your Luxor staff access',
+      text:`Use this one-time link to ${reset?'reset your Luxor password':'open the Luxor staff workspace'}. It expires in 30 minutes.\n\n${link}`
     })
   });
   if (!result.ok) throw new Error('Staff email delivery failed.');

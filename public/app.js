@@ -19,7 +19,7 @@ const options = (kind,selected,first) => option('',first,selected)+meta.categori
 const list = (value,separator=',') => String(value??'').split(separator).filter(Boolean);
 const badge = (text,pending=false) => `<span class="badge${pending?' pending':''}">${esc(text)}</span>`;
 const img = (asset,alt,cls='photo') => `<img class="${cls}" src="/api/photo/${esc(asset)}${staffPreview?'?view=staff':''}" alt="${esc(alt)}" loading="lazy">`;
-const blank = name => `<div class="placeholder" aria-hidden="true">${esc(name?.slice(0,2).toUpperCase() || 'LM')}</div>`;
+const blank = name => `<div class="placeholder" aria-hidden="true">${esc(name?.slice(0,2).toUpperCase() || 'LX')}</div>`;
 const empty = message => `<div class="empty">${esc(message)}</div>`;
 const button = (label,extra='') => `<button class="button ${extra}">${esc(label)}</button>`;
 const updateMeta = async () => { meta=await api('/api/meta'); };
@@ -191,7 +191,7 @@ function sendEvent(sku, kind) {
 async function renderPublicProduct(sku) {
   const item=await api('/api/product/'+encodeURIComponent(sku));
   const related=item.related ?? [];
-  document.title=item.name+' | Luxor Moolah';
+  document.title=item.name+' | Luxor';
   const message=`Hi! I'm interested in ${item.name} (${item.sku}). ${location.origin}/products/${encodeURIComponent(item.sku)}`;
   main.innerHTML=`<div class="shell section"><a class="small" href="/#catalog">← Back to the shop</a>
     <div class="detail">${gallery(item)}<section><div class="controls">${badge(item.product_type || item.sku)}
@@ -328,7 +328,7 @@ async function openStaff() {
   main.innerHTML=`<div class="workspace">
     <button type="button" class="button secondary workspace-menu" id="workspace-menu" aria-controls="workspace-sidebar" aria-expanded="false">☰ Menu</button>
     <aside class="workspace-sidebar" id="workspace-sidebar">
-      <a class="brand" href="/staff">Luxor <em>Moolah</em></a>
+      <a class="brand" href="/staff">Luxor</a>
       <nav class="workspace-nav" aria-label="Staff sections">${tabs.map(([name,icon])=>`
         <a href="${esc(staffLink(name,name==='Orders'?{view:'pending'}:{}))}" ${name===activeTab?'aria-current="page"':''}>
         <span class="workspace-icon" aria-hidden="true">${icon}</span>${esc(name)}
@@ -1608,7 +1608,7 @@ async function boot() {
     if(item) return await renderPublicProduct(decodeURIComponent(item[1]));
     return await renderShop();
   } catch(error) {
-    main.innerHTML=`<div class="shell section"><h2>${error.status===404?'Item unavailable':'Luxor Moolah'}</h2>
+    main.innerHTML=`<div class="shell section"><h2>${error.status===404?'Item unavailable':'Luxor'}</h2>
     ${empty(error.message)}<a class="button secondary" href="/">Back to the shop</a></div>`;
   }
 }

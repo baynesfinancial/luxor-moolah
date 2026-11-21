@@ -1,4 +1,4 @@
-# Luxor Moolah
+# Luxor
 
 One Cloudflare Workers project for the public catalog, employee workspace, and manager dashboard. Production hostname: **store.quincybaines.com**. The catalog starts empty until the manager adds inventory. The sample CSV contains a demonstration row.
 
