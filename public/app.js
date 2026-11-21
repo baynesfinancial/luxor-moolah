@@ -228,7 +228,8 @@ function signIn() {
     ${params.get('password')==='changed'?'<p role="status">Password saved. Sign in with your new password.</p>':''}
     ${params.has('error')?'<p class="alert">This link could not be used. Request a new one below.</p>':''}
     <form id="signin-form">${email}${field('password','Password','','password','required autocomplete="current-password" maxlength="128"')}
-    ${button('Sign in')}</form>
+    ${button('Sign in')}
+    ${supportsPasskeys()?'<button class="button secondary" type="button" id="passkey-signin">Sign in with a passkey</button>':''}</form>
     <details ${params.has('error')||params.get('password')==='help'?'open':''}><summary>Use an email link or reset your password</summary>
       <form id="email-access">${email}<div class="controls">
         ${button('Email me a sign-in link','secondary')}
@@ -239,6 +240,15 @@ function signIn() {
     await api('/api/auth/sign-in/email',{email:data.email.trim(),password:data.password,rememberMe:false});
     location.replace('/staff');
   });
+  $('#passkey-signin')?.addEventListener('click',async event=>{
+    const trigger=event.currentTarget;
+    trigger.disabled=true;
+    try {
+      await passkeyCeremony(false);
+      location.replace('/staff');
+    } catch(error) { notify(error.message); }
+    finally { trigger.disabled=false; }
+  });
   formHandler($('#email-access'),async(data,_,submit)=>{
     const email=data.email.trim();
     const reset=submit?.value==='reset';
@@ -247,6 +257,64 @@ function signIn() {
     });
     $('#signin-feedback').textContent=`If this email has staff access, check your inbox for a ${reset?'password reset':'sign-in'} link.`;
   });
+}
+const passkeyEndpoint='/api/auth/passkey/';
+const supportsPasskeys=()=>window.isSecureContext &&
+  typeof window.PublicKeyCredential?.parseCreationOptionsFromJSON==='function' &&
+  typeof window.PublicKeyCredential.parseRequestOptionsFromJSON==='function' &&
+  typeof window.PublicKeyCredential.prototype.toJSON==='function';
+async function passkeyCeremony(register,name) {
+  const action=register?'registration':'authentication';
+  const options=await api(passkeyEndpoint+(register?'generate-register-options':'generate-authenticate-options'));
+  let credential;
+  try {
+    credential=register
+      ? await navigator.credentials.create({publicKey:PublicKeyCredential.parseCreationOptionsFromJSON(options)})
+      : await navigator.credentials.get({publicKey:PublicKeyCredential.parseRequestOptionsFromJSON(options)});
+  } catch(error) {
+    if (error.name==='InvalidStateError' && register) throw new Error('This passkey is already registered.');
+    throw new Error(register?'Passkey setup did not complete. Try again.':'Passkey sign-in did not complete. Try again or use your password or an email link.');
+  }
+  if (!credential) throw new Error('No passkey was returned.');
+  await api(passkeyEndpoint+'verify-'+action,{response:credential.toJSON(),...(register?{name}:{})});
+}
+async function renderPasskeySettings() {
+  main.innerHTML=`<div class="shell"><section class="signin frame">
+    <h2>Manage passkeys</h2><p>${esc(staff.email)}</p>
+    ${supportsPasskeys()?`<form id="add-passkey">
+      ${field('name','Passkey name','','text','required maxlength="60" placeholder="For example, My phone"')}
+      ${button('Add passkey')}</form>`:'<p>Passkey setup requires a browser that supports passkeys.</p>'}
+    <div id="saved-passkeys" aria-live="polite"></div><p><a href="/staff">Back to workspace</a></p>
+  </section></div>`;
+  const saved=$('#saved-passkeys');
+  async function refresh() {
+    const passkeys=await api(passkeyEndpoint+'list-user-passkeys');
+    saved.innerHTML=passkeys.length?`<h3>Saved passkeys</h3><ul>${passkeys.map(key=>`<li><div class="controls">
+      <span>${esc(key.name||'Passkey')}</span>
+      <button type="button" class="button secondary" data-remove-passkey="${esc(key.id)}" aria-label="Remove ${esc(key.name||'passkey')}">Remove</button>
+    </div></li>`).join('')}</ul>`:'<p class="small">No passkeys saved.</p>';
+  }
+  saved.addEventListener('click',async event=>{
+    const trigger=event.target.closest('[data-remove-passkey]');
+    if (!trigger || !window.confirm('Remove this passkey from your Luxor account?')) return;
+    trigger.disabled=true;
+    try {
+      await api(passkeyEndpoint+'delete-passkey',{id:trigger.dataset.removePasskey});
+      await refresh();
+      notify('Passkey removed.');
+    } catch(error) { notify(error.message); }
+    finally { trigger.disabled=false; }
+  });
+  const form=$('#add-passkey');
+  if (form) formHandler(form,async({name})=>{
+    if (!name.trim()) throw new Error('Enter a name for this passkey.');
+    await passkeyCeremony(true,name.trim());
+    await refresh();
+    form.reset();
+    notify('Passkey saved.');
+  });
+  try { await refresh(); }
+  catch(error) { saved.textContent=error.message; }
 }
 function passwordForm() {
   const attributes='required minlength="12" maxlength="128" autocomplete="new-password"';
@@ -269,6 +337,7 @@ function renderPasswordSettings() {
     <p><strong>${esc(staff.email)}</strong> is your sign-in email.</p>
     ${staff.has_password?`<form id="reset-current"><div>${button('Email a password reset link','secondary')}</div>
       <p id="reset-feedback" role="status"></p></form>`:passwordForm()}
+    <p><a href="/staff?passkeys=manage">Manage passkeys</a></p>
     <p><a href="/staff">${staff.has_password?'Back to workspace':'Continue to workspace'}</a></p>
   </section></div>`;
   if (staff.has_password) formHandler($('#reset-current'),async()=>{
@@ -310,6 +379,7 @@ async function openStaff() {
     return signIn();
   }
   if (params.get('password')==='setup') return renderPasswordSettings();
+  if (params.get('passkeys')==='manage') return renderPasskeySettings();
   const manager=staff.role==='manager';
   const sku=params.get('sku');
   const aliases={Dashboard:'Overview',Sales:'Orders','CSV upload':'Inventory',Categories:'Inventory','Damage reports':'Reports'};
@@ -335,6 +405,7 @@ async function openStaff() {
         ${name==='Orders'?'<span id="workspace-pending" class="count-badge" hidden></span>':''}</a>`).join('')}</nav>
       <div class="workspace-account"><span class="small">${esc(staff.email)}</span>
         <a class="small" href="/staff?password=setup">${staff.has_password?'Manage password':'Set password'}</a>
+        <a class="small" href="/staff?passkeys=manage">Manage passkeys</a>
         <div class="controls"><a href="/">View storefront</a><button class="button secondary" id="signout">Sign out</button></div>
       </div>
     </aside>

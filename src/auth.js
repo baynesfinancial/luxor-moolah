@@ -1,5 +1,6 @@
 import { betterAuth } from 'better-auth';
 import { magicLink } from 'better-auth/plugins/magic-link';
+import { passkey } from '@better-auth/passkey';
 
 export async function seedAdmin(env, db) {
   const email = env.BOOTSTRAP_EMAIL?.trim().toLowerCase();
@@ -20,8 +21,9 @@ async function sendEmail(env, origin, email, link, reset=false) {
   });
   if (!result.ok) throw new Error('Staff email delivery failed.');
 }
-export function buildAuth(env, db, origin) {
+export function buildAuth(env, db, origin, enablePasskeys = false) {
   const baseURL = env.APP_ORIGIN || origin;
+  const passkeyURL = new URL(baseURL);
   const allowedEmail = email => db.one('SELECT id FROM users WHERE email=? AND active=1',email.toLowerCase());
   return betterAuth({
     baseURL, basePath:'/api/auth', secret:env.BETTER_AUTH_SECRET, database:env.DB,
@@ -71,9 +73,52 @@ export function buildAuth(env, db, origin) {
           await sendEmail(env,baseURL,email,url);
         }
       }
-    })]
+    }), ...(enablePasskeys ? [passkey({
+      rpID:passkeyURL.hostname, rpName:'Luxor', origin:passkeyURL.origin,
+      authenticatorSelection:{residentKey:'required',userVerification:'required'},
+      registration:{requireSession:true}
+    })] : [])]
   });
 }
+
+const passkeyRoutes = new Map([
+  ['generate-authenticate-options','GET'], ['verify-authentication','POST'],
+  ['generate-register-options','GET'], ['verify-registration','POST'],
+  ['list-user-passkeys','GET'], ['delete-passkey','POST']
+]);
+
+export async function handlePasskeyRequest(request,auth,db,env,url) {
+  const action=url.pathname.slice('/api/auth/passkey/'.length);
+  if (passkeyRoutes.get(action)!==request.method) return Response.json({error:'Page not found.'},{status:404});
+  const respond=(value,status=200)=>Response.json(value,{status,headers:{'Cache-Control':'no-store'}});
+  if (env.APP_ORIGIN && new URL(env.APP_ORIGIN).origin!==url.origin) {
+    return respond({error:'Open the primary Luxor website to use passkeys.'},400);
+  }
+  const signingIn=['generate-authenticate-options','verify-authentication'].includes(action);
+  if (!signingIn && !await staffSession(request,auth,db)) {
+    return respond({error:'Sign in to manage your passkeys.'},401);
+  }
+  const exists=await db.one("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='passkey'");
+  if (!exists) {
+    if (action==='list-user-passkeys') return respond([]);
+    if (action!=='generate-register-options') return respond({error:'No passkey is available. Sign in with your password or an email link.'},400);
+    // Provision the optional table on first enrollment so an existing store can deploy without a separate migration.
+    await db.batch([
+      db.sql(`CREATE TABLE IF NOT EXISTS passkey (
+        id TEXT PRIMARY KEY, name TEXT, publicKey TEXT NOT NULL,
+        userId TEXT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+        credentialID TEXT NOT NULL UNIQUE, counter INTEGER NOT NULL,
+        deviceType TEXT NOT NULL, backedUp INTEGER NOT NULL, transports TEXT, createdAt TEXT, aaguid TEXT
+      )`),
+      db.sql('CREATE INDEX IF NOT EXISTS passkey_user ON passkey(userId)')
+    ]);
+  }
+  const result=await buildAuth(env,db,url.origin,true).handler(request);
+  const headers=new Headers(result.headers);
+  headers.set('Cache-Control','no-store');
+  return new Response(result.body,{status:result.status,headers});
+}
+
 export async function staffSession(request, auth, db) {
   if (!request.headers.get('Cookie')) return null;
   const current = await auth.api.getSession({headers:request.headers});

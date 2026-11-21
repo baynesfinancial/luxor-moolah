@@ -17,6 +17,8 @@ Open the local URL printed by Wrangler. Choose **Staff workspace**, enter the bo
 
 Staff invitations and one-time sign-in links open password setup. After saving a password, sign in with your invited email and password. Existing users can choose **Set password** from the workspace sidebar. The staff sign-in page also offers password reset and one-time sign-in links.
 
+Invited staff can sign in once with their password or email link, then choose **Manage passkeys** and add a passkey. On supported browsers, **Sign in with a passkey** appears on the staff sign-in page. Passkeys are scoped to the hostname in `APP_ORIGIN` when it is configured. For local testing, use `localhost` consistently in your browser and local `APP_ORIGIN`.
+
 ```bash
 npm run check
 ```

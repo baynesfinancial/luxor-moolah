@@ -1,5 +1,5 @@
 import { HttpError, assert, clean, skuOf, units, money, date, dayInZone, offsetDay, emailOf, hashToken, goodImage } from './helpers.js';
-import { buildAuth, seedAdmin, staffSession } from './auth.js';
+import { buildAuth, handlePasskeyRequest, seedAdmin, staffSession } from './auth.js';
 import { dashboard } from './dashboard.js';
 import { deletionPreview, deleteRecord } from './cleanup.js';
 import { searchCustomers, createCustomer, customerId, customerDetail, listOrders, orderDetail, listReturns } from './customers.js';
@@ -378,6 +378,10 @@ async function api(request,env,db,url) {
   const authEnabled = Boolean(env.BETTER_AUTH_SECRET);
   const auth = authEnabled && (path.startsWith('/api/auth/') || path.startsWith('/api/staff/'))
     ? buildAuth(env,db,url.origin) : null;
+  if (path.startsWith('/api/auth/passkey/')) {
+    assert(auth,'Staff sign-in is not configured.',503);
+    return handlePasskeyRequest(request,auth,db,env,url);
+  }
   if (path === '/api/auth/sign-in/magic-link' && method === 'POST') {
     assert(auth,'Staff sign-in is not configured.',503);
     await seedAdmin(env,db);
